@@ -1,5 +1,10 @@
 # Template Changelog
 
+## 2026-05-23
+
+- Changed: Paperclip pin `v2026.416.0` → `v2026.517.0` (routine upstream uptake; see [paperclip v2026.517.0 release notes](https://github.com/paperclipai/paperclip/releases/tag/v2026.517.0)).
+- Added: `.github/workflows/bump-paperclip.yml` — weekly scheduled workflow (also `workflow_dispatch`) that runs `scripts/bump-paperclip-ref.mjs` and opens a PR when a new upstream Paperclip release is available.
+
 ## 2026-04-17
 
 - Fixed: WebSocket proxy upstream errors no longer crash the Node process (#6, duplicate #7) — `http-proxy` can pass a socket on WS failures, which has no `writeHead`; the wrapper now sends JSON 503 only for HTTP responses and destroys the socket otherwise.
