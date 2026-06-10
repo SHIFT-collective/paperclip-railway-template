@@ -9,7 +9,7 @@ RUN apt-get update \
 RUN corepack enable
 
 ARG PAPERCLIP_REPO=https://github.com/paperclipai/paperclip.git
-ARG PAPERCLIP_REF=v2026.517.0
+ARG PAPERCLIP_REF=v2026.609.0
 
 WORKDIR /paperclip
 RUN git clone --depth 1 --branch "${PAPERCLIP_REF}" "${PAPERCLIP_REPO}" .

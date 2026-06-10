@@ -1,5 +1,9 @@
 # Template Changelog
 
+## 2026-06-10
+
+- Changed: Paperclip pin `v2026.517.0` → `v2026.609.0` (routine upstream uptake to latest stable; see [paperclip v2026.609.0 release notes](https://github.com/paperclipai/paperclip/releases/tag/v2026.609.0) and [compare v2026.517.0...v2026.609.0](https://github.com/paperclipai/paperclip/compare/v2026.517.0...v2026.609.0)). **Upgrade note:** this bump includes 13 forward database migrations; they applied cleanly against an external Railway Postgres during an in-place upgrade of the live instance (no manual `CREATE EXTENSION` required). Take a Postgres + storage backup before redeploying.
+
 ## 2026-05-23
 
 - Changed: Paperclip pin `v2026.416.0` → `v2026.517.0` (routine upstream uptake; see [paperclip v2026.517.0 release notes](https://github.com/paperclipai/paperclip/releases/tag/v2026.517.0)).
