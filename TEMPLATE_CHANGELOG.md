@@ -1,5 +1,9 @@
 # Template Changelog
 
+## 2026-06-11
+
+- Added: downstream patch `patches/KIN-4355-issue-comment-authz.patch`, applied at build time on top of pinned upstream `v2026.609.0`. Splits a new `issue:comment` authorization action from `issue:mutate` so mention-woken non-assignee agents can comment on the issue that woke them (fixes the 403 "outside this actor's authorization boundary" on `POST /api/issues/:id/comments`). State-changing paths (`reopen`/`resume`/`interrupt`, non-comment PATCH fields, checkout) remain gated. Verified `git apply` clean against `v2026.609.0`; route tests pass (73 passed, 0 failed). Recommend upstreaming to `paperclipai/paperclip` and dropping the patch once a release contains it. See KIN-4355.
+
 ## 2026-06-10
 
 - Changed: Paperclip pin `v2026.517.0` → `v2026.609.0` (routine upstream uptake to latest stable; see [paperclip v2026.609.0 release notes](https://github.com/paperclipai/paperclip/releases/tag/v2026.609.0) and [compare v2026.517.0...v2026.609.0](https://github.com/paperclipai/paperclip/compare/v2026.517.0...v2026.609.0)). **Upgrade note:** this bump includes 13 forward database migrations; they applied cleanly against an external Railway Postgres during an in-place upgrade of the live instance (no manual `CREATE EXTENSION` required). Take a Postgres + storage backup before redeploying.
