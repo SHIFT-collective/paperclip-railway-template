@@ -13,6 +13,17 @@ ARG PAPERCLIP_REF=v2026.609.0
 
 WORKDIR /paperclip
 RUN git clone --depth 1 --branch "${PAPERCLIP_REF}" "${PAPERCLIP_REPO}" .
+
+# Downstream patches applied on top of the pinned upstream ref.
+# KIN-4355: split issue:comment from issue:mutate so mention-woken non-assignee
+# agents can comment on the issue that woke them. Verified to apply cleanly
+# against PAPERCLIP_REF=v2026.609.0. If you bump PAPERCLIP_REF, re-verify each
+# patch in patches/ still applies (the build fails loudly here if one doesn't).
+COPY patches/ /tmp/paperclip-patches/
+RUN for p in /tmp/paperclip-patches/*.patch; do \
+        echo "Applying $p" && git apply --verbose "$p"; \
+    done
+
 RUN pnpm install --frozen-lockfile
 RUN pnpm --filter @paperclipai/ui build
 RUN pnpm --filter @paperclipai/plugin-sdk build

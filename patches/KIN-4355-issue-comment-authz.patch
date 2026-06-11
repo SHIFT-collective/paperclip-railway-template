@@ -1,0 +1,421 @@
+diff --git a/server/src/__tests__/authorization-service.test.ts b/server/src/__tests__/authorization-service.test.ts
+index 2bba3349..0f39080a 100644
+--- a/server/src/__tests__/authorization-service.test.ts
++++ b/server/src/__tests__/authorization-service.test.ts
+@@ -323,6 +323,102 @@ describeEmbeddedPostgres("authorization service", () => {
+     expect(unrelatedDecision).toMatchObject({ allowed: false, reason: "deny_low_trust_boundary" });
+   });
+ 
++  // KIN-4355: issue:comment is an append-only communication action, split from the
++  // state-changing issue:mutate. A standard same-company agent may comment on an
++  // issue assigned to a DIFFERENT agent (the mention-wake flow), while issue:mutate
++  // on that same foreign-assigned issue stays denied.
++  it("allows a non-assignee same-company agent to comment but not mutate another agent's issue", async () => {
++    const company = await createCompany(db, "IssueCommentSplit");
++    const assigneeAgent = await createAgent(db, company.id);
++    const actorAgent = await createAgent(db, company.id);
++    const issue = await createIssue(db, company.id, {
++      assigneeAgentId: assigneeAgent.id,
++      status: "in_progress",
++    });
++
++    const authorization = authorizationService(db);
++    const actor = { type: "agent" as const, agentId: actorAgent.id, companyId: company.id, source: "agent_key" as const };
++    const resource = {
++      type: "issue" as const,
++      companyId: company.id,
++      issueId: issue.id,
++      projectId: issue.projectId,
++      parentIssueId: issue.parentId,
++      assigneeAgentId: issue.assigneeAgentId,
++      assigneeUserId: issue.assigneeUserId,
++      status: issue.status,
++    };
++
++    const commentDecision = await authorization.decide({ actor, action: "issue:comment", resource });
++    const mutateDecision = await authorization.decide({ actor, action: "issue:mutate", resource });
++    const readDecision = await authorization.decide({ actor, action: "issue:read", resource });
++
++    expect(commentDecision).toMatchObject({ allowed: true, reason: "allow_company_agent" });
++    expect(mutateDecision.allowed).toBe(false);
++    expect(readDecision).toMatchObject({ allowed: true, reason: "allow_company_agent" });
++  });
++
++  // KIN-4355: low-trust issue:comment is scoped to the trust boundary exactly like
++  // issue:read — allowed on an in-boundary issue, denied outside it.
++  it("scopes low-trust issue:comment to the trust boundary like issue:read", async () => {
++    const company = await createCompany(db, "LowTrustIssueComment");
++    const project = await createProject(db, company.id, "Allowed");
++    const otherProject = await createProject(db, company.id, "Denied");
++    const rootIssueId = randomUUID();
++    const actorAgent = await createAgent(db, company.id, {
++      permissions: {
++        trustPreset: LOW_TRUST_REVIEW_PRESET,
++        authorizationPolicy: {
++          trustBoundary: {
++            mode: LOW_TRUST_REVIEW_PRESET,
++            projectIds: [project.id],
++            rootIssueId,
++          },
++        },
++      },
++    });
++    const rootIssue = await createIssue(db, company.id, {
++      id: rootIssueId,
++      projectId: project.id,
++      assigneeAgentId: actorAgent.id,
++    });
++    const unrelatedIssue = await createIssue(db, company.id, {
++      projectId: otherProject.id,
++    });
++
++    const authorization = authorizationService(db);
++    const actor = { type: "agent" as const, agentId: actorAgent.id, companyId: company.id, source: "agent_key" as const };
++
++    const insideDecision = await authorization.decide({
++      actor,
++      action: "issue:comment",
++      resource: {
++        type: "issue",
++        companyId: company.id,
++        issueId: rootIssue.id,
++        projectId: rootIssue.projectId,
++        parentIssueId: rootIssue.parentId,
++        assigneeAgentId: rootIssue.assigneeAgentId,
++        status: rootIssue.status,
++      },
++    });
++    const outsideDecision = await authorization.decide({
++      actor,
++      action: "issue:comment",
++      resource: {
++        type: "issue",
++        companyId: company.id,
++        issueId: unrelatedIssue.id,
++        projectId: unrelatedIssue.projectId,
++        parentIssueId: unrelatedIssue.parentId,
++        status: unrelatedIssue.status,
++      },
++    });
++
++    expect(insideDecision).toMatchObject({ allowed: true, reason: "allow_low_trust_boundary" });
++    expect(outsideDecision).toMatchObject({ allowed: false, reason: "deny_low_trust_boundary" });
++  });
++
+   it("blocks low-trust project, agent, company-wide, and outside-boundary assignment access", async () => {
+     const company = await createCompany(db, "LowTrustOtherResources");
+     const project = await createProject(db, company.id, "Allowed");
+diff --git a/server/src/__tests__/issue-agent-mutation-ownership-routes.test.ts b/server/src/__tests__/issue-agent-mutation-ownership-routes.test.ts
+index 31bf37ff..2508993e 100644
+--- a/server/src/__tests__/issue-agent-mutation-ownership-routes.test.ts
++++ b/server/src/__tests__/issue-agent-mutation-ownership-routes.test.ts
+@@ -317,12 +317,14 @@ describe("agent issue mutation checkout ownership", () => {
+       allowed:
+         input.action === "tasks:assign" ||
+         input.action === "issue:read" ||
++        input.action === "issue:comment" ||
+         input.action === "issue:mutate" ||
+         input.action === "company_scope:read",
+       action: input.action,
+       reason:
+         input.action === "tasks:assign" ||
+           input.action === "issue:read" ||
++          input.action === "issue:comment" ||
+           input.action === "issue:mutate" ||
+           input.action === "company_scope:read"
+           ? "allow_explicit_grant"
+@@ -330,6 +332,7 @@ describe("agent issue mutation checkout ownership", () => {
+       explanation:
+         input.action === "tasks:assign" ||
+           input.action === "issue:read" ||
++          input.action === "issue:comment" ||
+           input.action === "issue:mutate" ||
+           input.action === "company_scope:read"
+           ? "Allowed by test default."
+@@ -568,7 +571,8 @@ describe("agent issue mutation checkout ownership", () => {
+   it.each([
+     ["patch", (app: express.Express) => request(app).patch(`/api/issues/${issueId}`).send({ title: "Blocked" })],
+     ["delete", (app: express.Express) => request(app).delete(`/api/issues/${issueId}`)],
+-    ["comment", (app: express.Express) => request(app).post(`/api/issues/${issueId}/comments`).send({ body: "blocked" })],
++    // KIN-4355: a pure comment is no longer a mutation — peer-comment behavior on an
++    // active checkout is covered explicitly below, not in this mutation matrix.
+     [
+       "document upsert",
+       (app: express.Express) =>
+@@ -914,7 +918,6 @@ describe("agent issue mutation checkout ownership", () => {
+ 
+   it.each([
+     ["todo", "patch", (app: express.Express) => request(app).patch(`/api/issues/${issueId}`).send({ title: "Todo update" })],
+-    ["todo", "comment", (app: express.Express) => request(app).post(`/api/issues/${issueId}/comments`).send({ body: "Todo noise" })],
+     ["blocked", "patch", (app: express.Express) => request(app).patch(`/api/issues/${issueId}`).send({ title: "Blocked update" })],
+   ])("rejects peer agent %s issue %s mutations outside active checkout ownership", async (status, _kind, sendRequest) => {
+     mockIssueService.getById.mockResolvedValue(makeIssue({ status: status as "todo" | "blocked", assigneeAgentId: ownerAgentId }));
+@@ -928,6 +931,47 @@ describe("agent issue mutation checkout ownership", () => {
+     expect(mockIssueService.addComment).not.toHaveBeenCalled();
+   });
+ 
++  // KIN-4355: a peer (non-assignee) agent may post an append-only comment even on an
++  // issue actively checked out by another agent — communication is split from mutation.
++  // The active checkout is NOT disturbed: no status change, no reopen.
++  it("allows a peer agent to comment on another agent's active checkout without mutating it", async () => {
++    mockIssueService.getById.mockResolvedValue(makeIssue({ status: "in_progress", assigneeAgentId: ownerAgentId }));
++    mockIssueService.addComment.mockResolvedValue({
++      id: "peer-comment-1",
++      issueId,
++      companyId,
++      body: "fyi from a mention-woken peer",
++      createdAt: new Date(),
++      updatedAt: new Date(),
++      authorAgentId: peerAgentId,
++      authorUserId: null,
++    });
++
++    const res = await request(await createApp(peerActor()))
++      .post(`/api/issues/${issueId}/comments`)
++      .send({ body: "fyi from a mention-woken peer" });
++
++    expect(res.status, JSON.stringify(res.body)).toBe(201);
++    expect(mockIssueService.addComment).toHaveBeenCalled();
++    expect(mockIssueService.update).not.toHaveBeenCalled();
++  });
++
++  // KIN-4355: a comment that carries state-changing intent (reopen/resume/interrupt)
++  // still goes through the full mutate gate — so a peer cannot use it to reopen or
++  // disturb another agent's active checkout.
++  it("still blocks a peer agent reopen-comment on another agent's active checkout", async () => {
++    mockIssueService.getById.mockResolvedValue(makeIssue({ status: "in_progress", assigneeAgentId: ownerAgentId }));
++
++    const res = await request(await createApp(peerActor()))
++      .post(`/api/issues/${issueId}/comments`)
++      .send({ body: "reopen please", reopen: true });
++
++    expect(res.status, JSON.stringify(res.body)).toBe(409);
++    expect(res.body.error).toBe("Issue is checked out by another agent");
++    expect(mockIssueService.addComment).not.toHaveBeenCalled();
++    expect(mockIssueService.update).not.toHaveBeenCalled();
++  });
++
+   it("allows same-company agent mutations on unassigned in-progress issues", async () => {
+     mockIssueService.getById.mockResolvedValue(makeIssue({ assigneeAgentId: null }));
+     mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({
+diff --git a/server/src/__tests__/issue-comment-reopen-routes.test.ts b/server/src/__tests__/issue-comment-reopen-routes.test.ts
+index 4043d86a..cd7a658f 100644
+--- a/server/src/__tests__/issue-comment-reopen-routes.test.ts
++++ b/server/src/__tests__/issue-comment-reopen-routes.test.ts
+@@ -522,7 +522,10 @@ describe.sequential("issue comment reopen routes", () => {
+     ));
+   });
+ 
+-  it("rejects non-assignee agent POST comments on closed issues", async () => {
++  // KIN-4355: a pure comment is append-only communication (issue:comment), so a
++  // non-assignee same-company agent may post it. Crucially the closed issue is NOT
++  // reopened — implicit status moves are suppressed for agent commenters.
++  it("allows non-assignee agent POST comments on closed issues without reopening", async () => {
+     mockIssueService.getById.mockResolvedValue(makeIssue("done"));
+     mockIssueService.addComment.mockResolvedValue({
+       id: "comment-1",
+@@ -545,10 +548,10 @@ describe.sequential("issue comment reopen routes", () => {
+       .post("/api/issues/11111111-1111-4111-8111-111111111111/comments")
+       .send({ body: "hello" });
+ 
+-    expect(res.status).toBe(403);
+-    expect(res.body.error).toBe("Agent cannot mutate another agent's issue");
++    expect(res.status, JSON.stringify(res.body)).toBe(201);
++    expect(mockIssueService.addComment).toHaveBeenCalled();
++    // closed issue stays closed: no reopen, no assignee wake
+     expect(mockIssueService.update).not.toHaveBeenCalled();
+-    expect(mockIssueService.addComment).not.toHaveBeenCalled();
+     expect(mockHeartbeatService.wakeup).not.toHaveBeenCalled();
+   });
+ 
+@@ -963,7 +966,9 @@ describe.sequential("issue comment reopen routes", () => {
+     );
+   });
+ 
+-  it("rejects non-assignee agent PATCH comments on closed issues", async () => {
++  // KIN-4355: a comment-only PATCH (a `comment` and no state fields) is routed
++  // through issue:comment, so a non-assignee agent may post it without reopening.
++  it("allows non-assignee agent comment-only PATCH on closed issues without reopening", async () => {
+     mockIssueService.getById.mockResolvedValue(makeIssue("done"));
+     mockIssueService.addComment.mockResolvedValue({
+       id: "comment-1",
+@@ -990,11 +995,13 @@ describe.sequential("issue comment reopen routes", () => {
+       .patch("/api/issues/11111111-1111-4111-8111-111111111111")
+       .send({ comment: "hello" });
+ 
+-    expect(res.status).toBe(403);
+-    expect(res.body.error).toBe("Agent cannot mutate another agent's issue");
+-    expect(mockIssueService.update).not.toHaveBeenCalled();
+-    expect(mockIssueService.addComment).not.toHaveBeenCalled();
+-    expect(mockHeartbeatService.wakeup).not.toHaveBeenCalled();
++    expect(res.status, JSON.stringify(res.body)).toBe(200);
++    expect(mockIssueService.addComment).toHaveBeenCalled();
++    // closed issue stays closed: the comment is recorded but the issue is NOT reopened
++    expect(mockIssueService.update).not.toHaveBeenCalledWith(
++      "11111111-1111-4111-8111-111111111111",
++      expect.objectContaining({ status: "todo" }),
++    );
+   });
+ 
+   it("does not move dependency-blocked issues to todo via the PATCH comment path", async () => {
+diff --git a/server/src/routes/issues.ts b/server/src/routes/issues.ts
+index 6241b79f..6ef00a96 100644
+--- a/server/src/routes/issues.ts
++++ b/server/src/routes/issues.ts
+@@ -704,6 +704,14 @@ function isClosedIssueStatus(status: string | null | undefined): status is "done
+   return status === "done" || status === "cancelled";
+ }
+ 
++// A PATCH body is "comment only" when it carries a comment and no field that
++// would change issue state or trigger a resume/reopen/interrupt side-effect.
++function isCommentOnlyIssueUpdate(body: Record<string, unknown>): boolean {
++  if (typeof body.comment !== "string" || body.comment.length === 0) return false;
++  const allowed = new Set(["comment", "presentation", "metadata"]);
++  return Object.keys(body).every((key) => allowed.has(key) || body[key] === undefined);
++}
++
+ function shouldImplicitlyMoveCommentedIssueToTodo(input: {
+   issueStatus: string | null | undefined;
+   assigneeAgentId: string | null | undefined;
+@@ -1658,7 +1666,7 @@ export function issueRoutes(
+       assigneeUserId: string | null;
+       status: string;
+     },
+-    action: "issue:read" | "issue:mutate",
++    action: "issue:read" | "issue:mutate" | "issue:comment",
+   ) {
+     return access.decide({
+       actor: req.actor,
+@@ -1690,6 +1698,25 @@ export function issueRoutes(
+     return false;
+   }
+ 
++  // Communication (append-only, author-attributed) is a lower privilege than
++  // issue:mutate (state change). Any actor that can read an issue may comment on
++  // it; state-changing intent is gated separately by assertAgentIssueMutationAllowed.
++  async function assertIssueCommentAllowed(req: Request, res: Response, issue: Parameters<typeof decideIssueAccess>[1]) {
++    // Non-agent actors (board/user) are not subject to the agent-scoped comment
++    // gate, mirroring assertAgentIssueMutationAllowed's short-circuit.
++    if (req.actor.type !== "agent") return true;
++    const decision = await decideIssueAccess(req, issue, "issue:comment");
++    if (decision.allowed) return true;
++    res.status(403).json({ error: "Issue is outside this actor's authorization boundary" });
++    return false;
++  }
++
++  async function actorCanMutateIssue(req: Request, issue: Parameters<typeof decideIssueAccess>[1]) {
++    if (req.actor.type !== "agent") return true;
++    const decision = await decideIssueAccess(req, issue, "issue:mutate");
++    return decision.allowed;
++  }
++
+   async function filterIssuesForActor<T extends Parameters<typeof decideIssueAccess>[1]>(req: Request, rows: T[]) {
+     const decisions = await Promise.all(rows.map((issue) => decideIssueAccess(req, issue, "issue:read")));
+     return rows.filter((_, index) => decisions[index]?.allowed);
+@@ -4638,7 +4665,11 @@ export function issueRoutes(
+     }
+     assertCompanyAccess(req, existing.companyId);
+     assertNoAgentHostWorkspaceCommandMutation(req, collectIssueWorkspaceCommandPaths(req.body));
+-    if (!(await assertAgentIssueMutationAllowed(req, res, existing))) return;
++    if (isCommentOnlyIssueUpdate(req.body)) {
++      if (!(await assertIssueCommentAllowed(req, res, existing))) return;
++    } else {
++      if (!(await assertAgentIssueMutationAllowed(req, res, existing))) return;
++    }
+     if (!(await assertCheapRecoveryIssueAssigneeProfileAllowed(req, res, existing, req.body))) return;
+ 
+     const actor = getActorInfo(req);
+@@ -6440,7 +6471,16 @@ export function issueRoutes(
+       return;
+     }
+     assertCompanyAccess(req, issue.companyId);
+-    if (!(await assertAgentIssueMutationAllowed(req, res, issue))) return;
++    const commentCarriesStateChange =
++      req.body.reopen === true || req.body.resume === true || req.body.interrupt === true;
++    const commenterCanMutate = await actorCanMutateIssue(req, issue);
++    if (commentCarriesStateChange) {
++      // reopen/resume/interrupt are state changes — keep the full mutate gate
++      // (also enforces the 409 "checked out by another agent" path).
++      if (!(await assertAgentIssueMutationAllowed(req, res, issue))) return;
++    } else {
++      if (!(await assertIssueCommentAllowed(req, res, issue))) return;
++    }
+     if (!assertStructuredCommentFieldsAllowed(req, res, {
+       presentation: req.body.presentation,
+       metadata: req.body.metadata,
+@@ -6474,15 +6514,18 @@ export function issueRoutes(
+     const shouldResumeInProgressScheduledRetry =
+       !!scheduledRetryForHumanComment &&
+       scheduledRetryForHumanComment.agentId === issue.assigneeAgentId;
++    // suppress implicit status moves for commenters without mutate authority so a
++    // foreign (e.g. mention-woken) commenter cannot flip another agent's status
+     const effectiveMoveToTodoRequested =
+-      explicitMoveToTodoRequested ||
+-      shouldImplicitlyMoveCommentedIssueToTodo({
+-        issueStatus: issue.status,
+-        assigneeAgentId: issue.assigneeAgentId,
+-        actorType: actor.actorType,
+-        actorId: actor.actorId,
+-      }) ||
+-      shouldResumeInProgressScheduledRetry;
++      commenterCanMutate &&
++      (explicitMoveToTodoRequested ||
++        shouldImplicitlyMoveCommentedIssueToTodo({
++          issueStatus: issue.status,
++          assigneeAgentId: issue.assigneeAgentId,
++          actorType: actor.actorType,
++          actorId: actor.actorId,
++        }) ||
++        shouldResumeInProgressScheduledRetry);
+     const hasUnresolvedFirstClassBlockers =
+       isBlocked && effectiveMoveToTodoRequested
+         ? (await svc.getDependencyReadiness(issue.id)).unresolvedBlockerCount > 0
+diff --git a/server/src/services/authorization.ts b/server/src/services/authorization.ts
+index 157c5d3c..5e5a0616 100644
+--- a/server/src/services/authorization.ts
++++ b/server/src/services/authorization.ts
+@@ -46,6 +46,7 @@ export type AuthorizationAction =
+   | "agent:wake"
+   | "company_scope:read"
+   | "issue:mutate"
++  | "issue:comment"
+   | "issue:read"
+   | "project:read"
+   | "runtime:manage"
+@@ -118,6 +119,7 @@ function permissionForAction(action: AuthorizationAction): PermissionKey | null
+     return null;
+   }
+   if (action === "issue:mutate") return null;
++  if (action === "issue:comment") return null;
+   return action;
+ }
+ 
+@@ -752,7 +754,11 @@ export function authorizationService(db: Db) {
+         : lowTrustDeny("Project is outside this low-trust boundary.");
+     }
+ 
+-    if (input.action === "issue:read" || input.action === "issue:mutate") {
++    if (
++      input.action === "issue:read" ||
++      input.action === "issue:mutate" ||
++      input.action === "issue:comment"
++    ) {
+       if (input.resource.type !== "issue") {
+         return lowTrustDeny("Low-trust issue access is missing an issue resource.");
+       }
+@@ -1024,6 +1030,7 @@ export function authorizationService(db: Db) {
+         input.action === "agent:wake" ||
+         input.action === "company_scope:read" ||
+         input.action === "issue:read" ||
++        input.action === "issue:comment" ||
+         input.action === "project:read" ||
+         input.action === "runtime:manage" ||
+         input.action === "secrets:read"
+@@ -1036,6 +1043,7 @@ export function authorizationService(db: Db) {
+       input.action === "agent:read" ||
+       input.action === "company_scope:read" ||
+       input.action === "issue:read" ||
++      input.action === "issue:comment" ||
+       input.action === "project:read" ||
+       input.action === "runtime:manage" ||
+       input.action === "secrets:read"
