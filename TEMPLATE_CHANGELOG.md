@@ -1,5 +1,9 @@
 # Template Changelog
 
+## 2026-06-12
+
+- Added: downstream patch `patches/KIN-4697-pending-interactions.patch`, applied at build time on top of pinned upstream `v2026.609.0`. Adds `GET /api/companies/:companyId/pending-interactions` (company-scoped, `company_scope:read`) and the `issueThreadInteractionService.listPendingForCompany()` method — the backend slice of the approved KIN-4606 "Better Actions" plan (Phase 1). Returns pending board-facing issue-thread interactions enriched with issue identifier/title/status, kind, title/summary, requesting agent, age, the plan/document target for plan-bound confirmations, and a stable `interaction-<id>` anchor; excludes terminal/hidden issues and resolved rows. Additive and read-only: no schema migration, no writes, existing accept/reject/respond routes (and `wake_assignee` continuation) unchanged. Responder binding (`responderUserId`/`approverUserId`) is Phase 3. Verified `git apply` clean against `v2026.609.0`; typecheck + route-coverage and service tests pass (the DB integration test runs in CI under a non-root user). Recommend upstreaming to `paperclipai/paperclip` and dropping the patch once a release contains it. See KIN-4697 (parent KIN-4606).
+
 ## 2026-06-11
 
 - Added: downstream patch `patches/KIN-4355-issue-comment-authz.patch`, applied at build time on top of pinned upstream `v2026.609.0`. Splits a new `issue:comment` authorization action from `issue:mutate` so mention-woken non-assignee agents can comment on the issue that woke them (fixes the 403 "outside this actor's authorization boundary" on `POST /api/issues/:id/comments`). State-changing paths (`reopen`/`resume`/`interrupt`, non-comment PATCH fields, checkout) remain gated. Verified `git apply` clean against `v2026.609.0`; route tests pass (73 passed, 0 failed). Recommend upstreaming to `paperclipai/paperclip` and dropping the patch once a release contains it. See KIN-4355.
