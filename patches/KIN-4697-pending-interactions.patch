@@ -1,0 +1,454 @@
+diff --git a/packages/shared/src/index.ts b/packages/shared/src/index.ts
+index 6468e6e4..3167ab91 100644
+--- a/packages/shared/src/index.ts
++++ b/packages/shared/src/index.ts
+@@ -570,6 +570,10 @@ export type {
+   IssueThreadInteraction,
+   IssueThreadInteractionPayload,
+   IssueThreadInteractionResult,
++  PendingInteractionIssueRef,
++  PendingInteractionAgentRef,
++  PendingInteraction,
++  PendingInteractionsResponse,
+   IssueDocument,
+   IssueDocumentSummary,
+   DocumentRevision,
+diff --git a/packages/shared/src/types/index.ts b/packages/shared/src/types/index.ts
+index 8bc246b8..2783d5eb 100644
+--- a/packages/shared/src/types/index.ts
++++ b/packages/shared/src/types/index.ts
+@@ -317,6 +317,10 @@ export type {
+   IssueThreadInteraction,
+   IssueThreadInteractionPayload,
+   IssueThreadInteractionResult,
++  PendingInteractionIssueRef,
++  PendingInteractionAgentRef,
++  PendingInteraction,
++  PendingInteractionsResponse,
+   IssueDocument,
+   IssueDocumentSummary,
+   DocumentRevision,
+diff --git a/packages/shared/src/types/issue.ts b/packages/shared/src/types/issue.ts
+index 100df099..61608be5 100644
+--- a/packages/shared/src/types/issue.ts
++++ b/packages/shared/src/types/issue.ts
+@@ -881,6 +881,43 @@ export type IssueThreadInteractionResult =
+   | RequestConfirmationResult
+   | RequestCheckboxConfirmationResult;
+ 
++/** Minimal issue context attached to a pending interaction row in the inbox. */
++export interface PendingInteractionIssueRef {
++  id: string;
++  identifier: string | null;
++  title: string;
++  status: string;
++}
++
++/** The agent that requested the decision (the interaction's creator). */
++export interface PendingInteractionAgentRef {
++  id: string;
++  name: string;
++}
++
++/**
++ * A pending issue-thread interaction surfaced outside its thread (e.g. the inbox
++ * "Decisions" section). Carries the full interaction so the UI can render the same
++ * card component, plus the issue context, requesting agent, age, and plan/document
++ * target needed to triage and deep-link (`#interaction-<id>`) without loading the thread.
++ */
++export interface PendingInteraction {
++  interaction: IssueThreadInteraction;
++  /** Stable thread anchor for deep-linking: `interaction-<id>`. */
++  anchor: string;
++  issue: PendingInteractionIssueRef;
++  requestedByAgent: PendingInteractionAgentRef | null;
++  requestedByUserId: string | null;
++  /** Seconds since the interaction was created, computed at query time. */
++  ageSeconds: number;
++  /** Document/plan target for plan-bound confirmations; null for plain decisions. */
++  target: RequestConfirmationTarget | null;
++}
++
++export interface PendingInteractionsResponse {
++  interactions: PendingInteraction[];
++}
++
+ export interface IssueAttachment {
+   id: string;
+   companyId: string;
+diff --git a/server/src/__tests__/pending-interactions.test.ts b/server/src/__tests__/pending-interactions.test.ts
+new file mode 100644
+index 00000000..38d7db3d
+--- /dev/null
++++ b/server/src/__tests__/pending-interactions.test.ts
+@@ -0,0 +1,235 @@
++import { randomUUID } from "node:crypto";
++import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
++import {
++  agents,
++  companies,
++  issueThreadInteractions,
++  issues,
++  createDb,
++} from "@paperclipai/db";
++import {
++  getEmbeddedPostgresTestSupport,
++  startEmbeddedPostgresTestDatabase,
++} from "./helpers/embedded-postgres.js";
++import { issueThreadInteractionService } from "../services/issue-thread-interactions.ts";
++
++const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
++const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
++
++if (!embeddedPostgresSupport.supported) {
++  console.warn(
++    `Skipping embedded Postgres pending-interactions tests on this host: ${embeddedPostgresSupport.reason ?? "unsupported environment"}`,
++  );
++}
++
++const confirmationPayload = (target?: Record<string, unknown> | null) => ({
++  version: 1 as const,
++  prompt: "Approve the plan?",
++  ...(target ? { target } : {}),
++});
++
++const questionPayload = () => ({
++  version: 1 as const,
++  questions: [
++    {
++      id: "q1",
++      prompt: "Which option?",
++      selectionMode: "single" as const,
++      options: [{ id: "o1", label: "Yes" }],
++    },
++  ],
++});
++
++describeEmbeddedPostgres("listPendingForCompany", () => {
++  let db!: ReturnType<typeof createDb>;
++  let svc!: ReturnType<typeof issueThreadInteractionService>;
++  let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
++
++  beforeAll(async () => {
++    tempDb = await startEmbeddedPostgresTestDatabase("paperclip-pending-interactions-");
++    db = createDb(tempDb.connectionString);
++    svc = issueThreadInteractionService(db);
++  }, 20_000);
++
++  afterEach(async () => {
++    await db.delete(issueThreadInteractions);
++    await db.delete(issues);
++    await db.delete(agents);
++    await db.delete(companies);
++  });
++
++  afterAll(async () => {
++    await tempDb?.cleanup();
++  });
++
++  it("returns pending board-facing interactions enriched with issue, agent, age, and target", async () => {
++    const companyId = randomUUID();
++    const agentId = randomUUID();
++    const openIssueId = randomUUID();
++    const questionIssueId = randomUUID();
++    const doneIssueId = randomUUID();
++    const hiddenIssueId = randomUUID();
++    const revisionId = randomUUID();
++
++    const confirmationId = randomUUID();
++    const questionId = randomUUID();
++    const acceptedId = randomUUID();
++    const doneIssueInteractionId = randomUUID();
++    const hiddenIssueInteractionId = randomUUID();
++
++    const now = new Date("2026-06-12T12:00:00.000Z");
++    const confirmationCreatedAt = new Date("2026-06-12T11:00:00.000Z"); // 1h old
++    const questionCreatedAt = new Date("2026-06-12T11:30:00.000Z"); // 30m old, created later
++
++    await db.insert(companies).values({
++      id: companyId,
++      name: "Kingdom Kratom",
++      issuePrefix: "KIN",
++      requireBoardApprovalForNewAgents: false,
++    });
++
++    await db.insert(agents).values({
++      id: agentId,
++      companyId,
++      name: "CTO",
++      role: "engineer",
++      status: "active",
++      adapterType: "claude_local",
++      adapterConfig: {},
++      runtimeConfig: {},
++      permissions: {},
++    });
++
++    await db.insert(issues).values([
++      { id: openIssueId, companyId, title: "Confirm plan", status: "in_review", identifier: "KIN-1", issueNumber: 1 },
++      { id: questionIssueId, companyId, title: "Answer question", status: "todo", identifier: "KIN-2", issueNumber: 2 },
++      { id: doneIssueId, companyId, title: "Closed work", status: "done", identifier: "KIN-3", issueNumber: 3 },
++      {
++        id: hiddenIssueId,
++        companyId,
++        title: "Hidden work",
++        status: "todo",
++        identifier: "KIN-4",
++        issueNumber: 4,
++        hiddenAt: now,
++      },
++    ]);
++
++    await db.insert(issueThreadInteractions).values([
++      {
++        id: confirmationId,
++        companyId,
++        issueId: openIssueId,
++        kind: "request_confirmation",
++        status: "pending",
++        continuationPolicy: "wake_assignee",
++        title: "Plan approval",
++        summary: "Approve the Better Actions plan",
++        createdByAgentId: agentId,
++        payload: confirmationPayload({
++          type: "issue_document",
++          key: "plan",
++          revisionId,
++          revisionNumber: 2,
++        }),
++        createdAt: confirmationCreatedAt,
++        updatedAt: confirmationCreatedAt,
++      },
++      {
++        id: questionId,
++        companyId,
++        issueId: questionIssueId,
++        kind: "ask_user_questions",
++        status: "pending",
++        continuationPolicy: "wake_assignee",
++        createdByUserId: "board-user",
++        payload: questionPayload(),
++        createdAt: questionCreatedAt,
++        updatedAt: questionCreatedAt,
++      },
++      // Excluded: already resolved (not pending).
++      {
++        id: acceptedId,
++        companyId,
++        issueId: openIssueId,
++        kind: "request_confirmation",
++        status: "accepted",
++        continuationPolicy: "wake_assignee",
++        createdByAgentId: agentId,
++        payload: confirmationPayload(),
++        createdAt: confirmationCreatedAt,
++        updatedAt: confirmationCreatedAt,
++      },
++      // Excluded: pending but on a terminal (done) issue.
++      {
++        id: doneIssueInteractionId,
++        companyId,
++        issueId: doneIssueId,
++        kind: "request_confirmation",
++        status: "pending",
++        continuationPolicy: "wake_assignee",
++        createdByAgentId: agentId,
++        payload: confirmationPayload(),
++        createdAt: confirmationCreatedAt,
++        updatedAt: confirmationCreatedAt,
++      },
++      // Excluded: pending but on a hidden issue.
++      {
++        id: hiddenIssueInteractionId,
++        companyId,
++        issueId: hiddenIssueId,
++        kind: "request_confirmation",
++        status: "pending",
++        continuationPolicy: "wake_assignee",
++        createdByAgentId: agentId,
++        payload: confirmationPayload(),
++        createdAt: confirmationCreatedAt,
++        updatedAt: confirmationCreatedAt,
++      },
++    ]);
++
++    const pending = await svc.listPendingForCompany(companyId, { now });
++
++    expect(pending.map((p) => p.interaction.id)).toEqual([confirmationId, questionId]);
++
++    const [confirmation, question] = pending;
++
++    // Plan-bound confirmation: full context + document target + requesting agent + age.
++    expect(confirmation.anchor).toBe(`interaction-${confirmationId}`);
++    expect(confirmation.issue).toEqual({
++      id: openIssueId,
++      identifier: "KIN-1",
++      title: "Confirm plan",
++      status: "in_review",
++    });
++    expect(confirmation.requestedByAgent).toEqual({ id: agentId, name: "CTO" });
++    expect(confirmation.requestedByUserId).toBeNull();
++    expect(confirmation.target).toEqual({
++      type: "issue_document",
++      key: "plan",
++      revisionId,
++      revisionNumber: 2,
++    });
++    expect(confirmation.ageSeconds).toBe(3600);
++    expect(confirmation.interaction.kind).toBe("request_confirmation");
++
++    // Question: no document target, created by a board user (no requesting agent).
++    expect(question.anchor).toBe(`interaction-${questionId}`);
++    expect(question.target).toBeNull();
++    expect(question.requestedByAgent).toBeNull();
++    expect(question.requestedByUserId).toBe("board-user");
++    expect(question.ageSeconds).toBe(1800);
++  });
++
++  it("returns an empty list when the company has no pending interactions", async () => {
++    const companyId = randomUUID();
++    await db.insert(companies).values({
++      id: companyId,
++      name: "Empty Co",
++      issuePrefix: "EMP",
++      requireBoardApprovalForNewAgents: false,
++    });
++
++    expect(await svc.listPendingForCompany(companyId, { now: new Date() })).toEqual([]);
++  });
++});
+diff --git a/server/src/routes/issues.ts b/server/src/routes/issues.ts
+index 6241b79f..52323b99 100644
+--- a/server/src/routes/issues.ts
++++ b/server/src/routes/issues.ts
+@@ -2275,6 +2275,28 @@ export function issueRoutes(
+     res.json(result);
+   });
+ 
++  // Pending issue-thread interactions across the company, for the inbox "Decisions"
++  // section (KIN-4697 / KIN-4606 Phase 1). The `responderUserId` query param is accepted
++  // for forward compatibility — only `me`/absent is meaningful until responder binding
++  // ships in Phase 3, so this returns every pending board-facing interaction in the
++  // company. Resolution still happens via the existing per-issue accept/reject/respond
++  // routes, so continuation wakes behave identically whether resolved here or in-thread.
++  router.get("/companies/:companyId/pending-interactions", async (req, res) => {
++    const companyId = req.params.companyId as string;
++    assertCompanyAccess(req, companyId);
++    const companyScopeDecision = await access.decide({
++      actor: req.actor,
++      action: "company_scope:read",
++      resource: { type: "company", companyId },
++    });
++    if (!companyScopeDecision.allowed) {
++      res.status(403).json({ error: "Pending interactions are outside this actor's authorization boundary" });
++      return;
++    }
++    const interactions = await issueThreadInteractionsSvc.listPendingForCompany(companyId);
++    res.json({ interactions });
++  });
++
+   router.get("/companies/:companyId/issues", async (req, res) => {
+     const companyId = req.params.companyId as string;
+     assertCompanyAccess(req, companyId);
+diff --git a/server/src/routes/openapi.ts b/server/src/routes/openapi.ts
+index 4e599695..c699e4b3 100644
+--- a/server/src/routes/openapi.ts
++++ b/server/src/routes/openapi.ts
+@@ -4024,6 +4024,7 @@ for (const route of [
+   ["get", "/api/companies/import/jobs/{jobId}", "Get company import job status"],
+   ["get", "/api/companies/{companyId}/search", "Search company data"],
+   ["get", "/api/companies/{companyId}/issues/count", "Count issues in a company"],
++  ["get", "/api/companies/{companyId}/pending-interactions", "List pending issue-thread interactions awaiting a board decision"],
+ ] as const) {
+   registerCurrentRoute({
+     method: route[0],
+diff --git a/server/src/services/issue-thread-interactions.ts b/server/src/services/issue-thread-interactions.ts
+index c75071eb..13d9e14b 100644
+--- a/server/src/services/issue-thread-interactions.ts
++++ b/server/src/services/issue-thread-interactions.ts
+@@ -1,7 +1,8 @@
+ import { isDeepStrictEqual } from "node:util";
+-import { and, asc, eq, inArray, isNotNull } from "drizzle-orm";
++import { and, asc, eq, inArray, isNotNull, isNull, notInArray } from "drizzle-orm";
+ import type { Db } from "@paperclipai/db";
+ import {
++  agents,
+   documents,
+   heartbeatRuns,
+   issueComments,
+@@ -16,6 +17,7 @@ import type {
+   CancelIssueThreadInteraction,
+   CreateIssueThreadInteraction,
+   IssueThreadInteraction,
++  PendingInteraction,
+   RequestCheckboxConfirmationInteraction,
+   RequestConfirmationInteraction,
+   RequestConfirmationTarget,
+@@ -755,6 +757,67 @@ export function issueThreadInteractionService(db: Db) {
+       return row ? hydrateInteraction(row) : null;
+     },
+ 
++    /**
++     * Pending issue-thread interactions across a company, enriched for the inbox
++     * "Decisions" section: issue context, requesting agent, age, and the plan/document
++     * target for plan-bound confirmations. Interactions on terminal (done/cancelled) or
++     * hidden issues are excluded — those decisions are no longer actionable.
++     *
++     * Note (KIN-4697): responder binding (`responderUserId`) ships in Phase 3. Until then
++     * any board member may decide, so this returns every pending board-facing interaction
++     * in the company regardless of the `responderUserId=me` filter passed by the caller.
++     */
++    listPendingForCompany: async (
++      companyId: string,
++      opts?: { now?: Date },
++    ): Promise<PendingInteraction[]> => {
++      const now = opts?.now ?? new Date();
++      const rows = await db
++        .select({
++          interaction: issueThreadInteractions,
++          issueIdentifier: issues.identifier,
++          issueTitle: issues.title,
++          issueStatus: issues.status,
++          agentId: agents.id,
++          agentName: agents.name,
++        })
++        .from(issueThreadInteractions)
++        .innerJoin(issues, eq(issueThreadInteractions.issueId, issues.id))
++        .leftJoin(agents, eq(issueThreadInteractions.createdByAgentId, agents.id))
++        .where(and(
++          eq(issueThreadInteractions.companyId, companyId),
++          eq(issueThreadInteractions.status, "pending"),
++          notInArray(issues.status, ["done", "cancelled"]),
++          isNull(issues.hiddenAt),
++        ))
++        .orderBy(asc(issueThreadInteractions.createdAt), asc(issueThreadInteractions.id));
++
++      return rows.map((row) => {
++        const interaction = hydrateInteraction(row.interaction);
++        const target =
++          interaction.kind === "request_confirmation"
++          || interaction.kind === "request_checkbox_confirmation"
++            ? interaction.payload.target ?? null
++            : null;
++        const createdAtMs = new Date(interaction.createdAt).getTime();
++        const ageSeconds = Math.max(0, Math.floor((now.getTime() - createdAtMs) / 1000));
++        return {
++          interaction,
++          anchor: `interaction-${interaction.id}`,
++          issue: {
++            id: row.interaction.issueId,
++            identifier: row.issueIdentifier ?? null,
++            title: row.issueTitle,
++            status: row.issueStatus,
++          },
++          requestedByAgent: row.agentId ? { id: row.agentId, name: row.agentName ?? "" } : null,
++          requestedByUserId: interaction.createdByUserId ?? null,
++          ageSeconds,
++          target,
++        } satisfies PendingInteraction;
++      });
++    },
++
+     create: async (
+       issue: { id: string; companyId: string },
+       input: CreateIssueThreadInteraction,
