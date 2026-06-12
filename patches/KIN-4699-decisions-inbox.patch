@@ -1,0 +1,761 @@
+diff --git a/ui/src/api/issues.ts b/ui/src/api/issues.ts
+index 4fc2e7f..5871e90 100644
+--- a/ui/src/api/issues.ts
++++ b/ui/src/api/issues.ts
+@@ -19,6 +19,7 @@ import type {
+   IssueTreeControlPreview,
+   IssueTreeHold,
+   IssueWorkProduct,
++  PendingInteractionsResponse,
+   PreviewIssueTreeControl,
+   ReleaseIssueTreeHold,
+   UpsertIssueDocument,
+@@ -206,6 +207,10 @@ export const issuesApi = {
+   },
+   listInteractions: (id: string) =>
+     api.get<IssueThreadInteraction[]>(`/issues/${id}/interactions`),
++  listPendingInteractions: (companyId: string, responderUserId?: string) => {
++    const qs = responderUserId ? `?responderUserId=${encodeURIComponent(responderUserId)}` : "";
++    return api.get<PendingInteractionsResponse>(`/companies/${companyId}/pending-interactions${qs}`);
++  },
+   listAcceptedPlanDecompositions: (id: string) =>
+     api.get<AcceptedPlanDecompositionSummary[]>(`/issues/${id}/accepted-plan-decompositions`),
+   createInteraction: (id: string, data: Record<string, unknown>) =>
+diff --git a/ui/src/components/DecisionsInbox.tsx b/ui/src/components/DecisionsInbox.tsx
+new file mode 100644
+index 0000000..71e0602
+--- /dev/null
++++ b/ui/src/components/DecisionsInbox.tsx
+@@ -0,0 +1,591 @@
++import { useCallback, useMemo, useState } from "react";
++import { useQuery, useQueryClient } from "@tanstack/react-query";
++import {
++  CircleHelp,
++  GitBranch,
++  ListChecks,
++  Loader2,
++  MessageSquareQuote,
++  SquareArrowOutUpRight,
++} from "lucide-react";
++import type {
++  Agent,
++  AskUserQuestionsAnswer,
++  IssueThreadInteraction,
++  IssueThreadInteractionKind,
++  PendingInteraction,
++  RequestConfirmationTarget,
++} from "@paperclipai/shared";
++import { issuesApi } from "../api/issues";
++import { queryKeys } from "../lib/queryKeys";
++import { cn } from "../lib/utils";
++import { timeAgo } from "../lib/timeAgo";
++import { createIssueDetailPath } from "../lib/issueDetailBreadcrumb";
++import { Link } from "../lib/router";
++import { Button } from "@/components/ui/button";
++import { Textarea } from "@/components/ui/textarea";
++import {
++  Sheet,
++  SheetContent,
++  SheetDescription,
++  SheetHeader,
++  SheetTitle,
++} from "@/components/ui/sheet";
++import { IssueGroupHeader } from "./IssueGroupHeader";
++import { IssueThreadInteractionCard } from "./IssueThreadInteractionCard";
++import { MarkdownBody } from "./MarkdownBody";
++
++const KIND_ICON: Record<IssueThreadInteractionKind, typeof CircleHelp> = {
++  request_confirmation: CircleHelp,
++  request_checkbox_confirmation: ListChecks,
++  ask_user_questions: MessageSquareQuote,
++  suggest_tasks: GitBranch,
++};
++
++const KIND_LABEL: Record<IssueThreadInteractionKind, string> = {
++  request_confirmation: "request",
++  request_checkbox_confirmation: "checkbox",
++  ask_user_questions: "questions",
++  suggest_tasks: "tasks",
++};
++
++const KIND_TITLE_FALLBACK: Record<IssueThreadInteractionKind, string> = {
++  request_confirmation: "Confirmation requested",
++  request_checkbox_confirmation: "Selection requested",
++  ask_user_questions: "Questions for you",
++  suggest_tasks: "Suggested tasks",
++};
++
++export const DECISIONS_GROUP_KEY = "decisions";
++
++function interactionTitle(interaction: IssueThreadInteraction): string {
++  return interaction.title?.trim() || KIND_TITLE_FALLBACK[interaction.kind];
++}
++
++/**
++ * A plain yes/no confirmation resolves inline only when there is no document/plan
++ * target and no longer details body — everything else opens the Quick view.
++ * Mirrors the board rule "only plain yes/no resolves inline".
++ */
++function resolvesInline(pending: PendingInteraction): boolean {
++  const { interaction } = pending;
++  if (interaction.kind !== "request_confirmation") return false;
++  if (pending.target) return false;
++  const details = interaction.payload.detailsMarkdown?.trim();
++  if (details) return false;
++  return true;
++}
++
++function targetLabel(target: RequestConfirmationTarget): string {
++  if (target.label) return target.label;
++  const revision = target.revisionNumber ? ` v${target.revisionNumber}` : "";
++  if (target.type === "issue_document" && target.key === "plan") return `Plan${revision}`;
++  return `${target.key}${revision}`;
++}
++
++function requesterLabel(
++  pending: PendingInteraction,
++  userLabelMap?: ReadonlyMap<string, string> | null,
++): string {
++  if (pending.requestedByAgent?.name) return pending.requestedByAgent.name;
++  if (pending.requestedByUserId) {
++    return userLabelMap?.get(pending.requestedByUserId) ?? "A teammate";
++  }
++  return "An agent";
++}
++
++/**
++ * Resolution actions for pending interactions, shared by the inline rows and the
++ * Quick view slide-over so both behave exactly like resolving on the thread card:
++ * same accept/reject/respond/cancel routes, same continuation wakes server-side.
++ * Each call invalidates the pending-interactions list (so the row leaves the
++ * Decisions section + the badge decrements) and the source issue detail.
++ */
++export function useDecisionInteractionActions(companyId: string | null | undefined) {
++  const queryClient = useQueryClient();
++
++  const invalidate = useCallback(
++    (issueId: string) => {
++      if (companyId) {
++        queryClient.invalidateQueries({ queryKey: queryKeys.pendingInteractions(companyId) });
++      }
++      queryClient.invalidateQueries({ queryKey: queryKeys.issues.detail(issueId) });
++    },
++    [companyId, queryClient],
++  );
++
++  const accept = useCallback(
++    async (
++      interaction: IssueThreadInteraction,
++      selectedClientKeys?: string[],
++      selectedOptionIds?: string[],
++    ) => {
++      const updated = await issuesApi.acceptInteraction(interaction.issueId, interaction.id, {
++        selectedClientKeys,
++        selectedOptionIds,
++      });
++      invalidate(interaction.issueId);
++      return updated;
++    },
++    [invalidate],
++  );
++
++  const reject = useCallback(
++    async (interaction: IssueThreadInteraction, reason?: string) => {
++      const updated = await issuesApi.rejectInteraction(interaction.issueId, interaction.id, reason);
++      invalidate(interaction.issueId);
++      return updated;
++    },
++    [invalidate],
++  );
++
++  const submit = useCallback(
++    async (interaction: IssueThreadInteraction, answers: AskUserQuestionsAnswer[]) => {
++      const updated = await issuesApi.respondToInteraction(interaction.issueId, interaction.id, {
++        answers,
++      });
++      invalidate(interaction.issueId);
++      return updated;
++    },
++    [invalidate],
++  );
++
++  const cancel = useCallback(
++    async (interaction: IssueThreadInteraction) => {
++      const updated = await issuesApi.cancelInteraction(interaction.issueId, interaction.id);
++      invalidate(interaction.issueId);
++      return updated;
++    },
++    [invalidate],
++  );
++
++  return { accept, reject, submit, cancel };
++}
++
++type DecisionActions = ReturnType<typeof useDecisionInteractionActions>;
++
++function DecisionInboxRow({
++  pending,
++  actions,
++  userLabelMap,
++  onOpenQuickView,
++}: {
++  pending: PendingInteraction;
++  actions: DecisionActions;
++  userLabelMap?: ReadonlyMap<string, string> | null;
++  onOpenQuickView: (pending: PendingInteraction) => void;
++}) {
++  const { interaction } = pending;
++  const Icon = KIND_ICON[interaction.kind];
++  const inline = resolvesInline(pending);
++  const [busy, setBusy] = useState(false);
++  const [rejecting, setRejecting] = useState(false);
++  const [reason, setReason] = useState("");
++  const [reasonError, setReasonError] = useState(false);
++
++  const payload = interaction.kind === "request_confirmation" ? interaction.payload : null;
++  const requiresReason = payload?.rejectRequiresReason === true;
++  const allowReason = payload?.allowDeclineReason !== false;
++  const acceptLabel = payload?.acceptLabel || "Accept";
++
++  const handleAccept = useCallback(async () => {
++    setBusy(true);
++    try {
++      await actions.accept(interaction);
++    } finally {
++      setBusy(false);
++    }
++  }, [actions, interaction]);
++
++  const handleRejectClick = useCallback(() => {
++    if (requiresReason || allowReason) {
++      setRejecting(true);
++      return;
++    }
++    setBusy(true);
++    void actions.reject(interaction).finally(() => setBusy(false));
++  }, [actions, interaction, requiresReason, allowReason]);
++
++  const handleConfirmReject = useCallback(async () => {
++    const trimmed = reason.trim();
++    if (requiresReason && !trimmed) {
++      setReasonError(true);
++      return;
++    }
++    setBusy(true);
++    try {
++      await actions.reject(interaction, trimmed || undefined);
++    } finally {
++      setBusy(false);
++    }
++  }, [actions, interaction, reason, requiresReason]);
++
++  const metaIdentifier = pending.issue.identifier;
++
++  return (
++    <div className="group border-b border-border px-2 py-2.5 last:border-b-0 sm:px-1 sm:pr-3 sm:py-2">
++      <div className="flex items-start gap-2 sm:items-center">
++        <div className="mt-0.5 shrink-0 rounded-md bg-muted p-1.5 sm:mt-0">
++          <Icon className="h-4 w-4 text-muted-foreground" />
++        </div>
++        <button
++          type="button"
++          className="min-w-0 flex-1 text-left"
++          onClick={() => onOpenQuickView(pending)}
++        >
++          <div className="line-clamp-2 text-sm font-medium sm:truncate sm:line-clamp-none">
++            {interactionTitle(interaction)}
++          </div>
++          <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
++            <span>{KIND_LABEL[interaction.kind]}</span>
++            <span aria-hidden>·</span>
++            <span>{requesterLabel(pending, userLabelMap)}</span>
++            {metaIdentifier ? (
++              <>
++                <span aria-hidden>·</span>
++                <span className="font-mono text-muted-foreground">{metaIdentifier}</span>
++              </>
++            ) : null}
++            <span aria-hidden>·</span>
++            <span>{timeAgo(interaction.createdAt)}</span>
++          </div>
++        </button>
++        <div className="ml-auto hidden shrink-0 items-center gap-2 sm:flex">
++          {inline ? (
++            <>
++              <Button
++                className="h-8 bg-green-700 px-3 text-white hover:bg-green-600"
++                disabled={busy || rejecting}
++                onClick={handleAccept}
++              >
++                {busy && !rejecting ? <Loader2 className="h-4 w-4 animate-spin" /> : acceptLabel}
++              </Button>
++              <Button
++                variant="destructive"
++                className="h-8 px-3"
++                aria-label="Reject"
++                disabled={busy}
++                onClick={handleRejectClick}
++              >
++                ✕
++              </Button>
++            </>
++          ) : (
++            <Button variant="outline" className="h-8 px-3" onClick={() => onOpenQuickView(pending)}>
++              See question
++            </Button>
++          )}
++        </div>
++      </div>
++
++      {/* Inline reject-with-reason — grows the row in place, never opens the slide-over. */}
++      {inline && rejecting ? (
++        <div className="mt-3 sm:pl-9">
++          <Textarea
++            className={cn(
++              "min-h-16",
++              reasonError && "border-rose-500 focus-visible:ring-rose-500/25",
++            )}
++            placeholder={
++              requiresReason
++                ? payload?.rejectReasonLabel || "What should change?"
++                : "Optional: tell the agent what you'd change."
++            }
++            value={reason}
++            onChange={(event) => {
++              setReason(event.target.value);
++              if (reasonError) setReasonError(false);
++            }}
++          />
++          {reasonError ? (
++            <p className="mt-1 text-xs text-rose-500">A decline reason is required.</p>
++          ) : null}
++          <div className="mt-2 flex justify-end gap-2">
++            <Button
++              variant="ghost"
++              className="h-8 px-3"
++              disabled={busy}
++              onClick={() => {
++                setRejecting(false);
++                setReason("");
++                setReasonError(false);
++              }}
++            >
++              Cancel
++            </Button>
++            <Button
++              variant="destructive"
++              className="h-8 px-3"
++              disabled={busy}
++              onClick={handleConfirmReject}
++            >
++              {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : "Decline"}
++            </Button>
++          </div>
++        </div>
++      ) : null}
++
++      {/* Mobile actions stacked below the row (parity with ApprovalInboxRow). */}
++      <div className="mt-3 flex gap-2 sm:hidden">
++        {inline && !rejecting ? (
++          <>
++            <Button
++              className="h-8 flex-1 bg-green-700 px-3 text-white hover:bg-green-600"
++              disabled={busy}
++              onClick={handleAccept}
++            >
++              {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : acceptLabel}
++            </Button>
++            <Button
++              variant="destructive"
++              className="h-8 flex-1 px-3"
++              disabled={busy}
++              onClick={handleRejectClick}
++            >
++              Reject
++            </Button>
++          </>
++        ) : !inline ? (
++          <Button
++            variant="outline"
++            className="h-8 flex-1 px-3"
++            onClick={() => onOpenQuickView(pending)}
++          >
++            See question
++          </Button>
++        ) : null}
++      </div>
++    </div>
++  );
++}
++
++export function DecisionsSection({
++  pendingInteractions,
++  collapsed,
++  onToggleCollapse,
++  agentMap,
++  userLabelMap,
++  currentUserId,
++  companyId,
++}: {
++  pendingInteractions: PendingInteraction[];
++  collapsed: boolean;
++  onToggleCollapse: () => void;
++  agentMap?: Map<string, Agent>;
++  userLabelMap?: ReadonlyMap<string, string> | null;
++  currentUserId?: string | null;
++  companyId: string | null | undefined;
++}) {
++  const actions = useDecisionInteractionActions(companyId);
++  const [openPending, setOpenPending] = useState<PendingInteraction | null>(null);
++
++  // Oldest-requested first (FIFO) so nothing starves; kind does not change order.
++  const ordered = useMemo(
++    () =>
++      [...pendingInteractions].sort((a, b) => {
++        const at = new Date(a.interaction.createdAt).getTime();
++        const bt = new Date(b.interaction.createdAt).getTime();
++        return at - bt;
++      }),
++    [pendingInteractions],
++  );
++
++  if (ordered.length === 0) return null;
++
++  return (
++    <div className="overflow-hidden rounded-xl border-l-2 border-sky-500/70">
++      <div className="px-3 sm:px-4">
++        <IssueGroupHeader
++          label={`Decisions · ${ordered.length}`}
++          collapsible
++          collapsed={collapsed}
++          onToggle={onToggleCollapse}
++          trailing={
++            <span className="text-xs font-normal normal-case tracking-normal text-muted-foreground">
++              Needs your response
++            </span>
++          }
++        />
++      </div>
++      {!collapsed ? (
++        <div>
++          {ordered.map((pending) => (
++            <DecisionInboxRow
++              key={pending.interaction.id}
++              pending={pending}
++              actions={actions}
++              userLabelMap={userLabelMap}
++              onOpenQuickView={setOpenPending}
++            />
++          ))}
++        </div>
++      ) : null}
++
++      <DecisionQuickView
++        pending={openPending}
++        actions={actions}
++        agentMap={agentMap}
++        userLabelMap={userLabelMap}
++        currentUserId={currentUserId}
++        onClose={() => setOpenPending(null)}
++      />
++    </div>
++  );
++}
++
++function DecisionQuickView({
++  pending,
++  actions,
++  agentMap,
++  userLabelMap,
++  currentUserId,
++  onClose,
++}: {
++  pending: PendingInteraction | null;
++  actions: DecisionActions;
++  agentMap?: Map<string, Agent>;
++  userLabelMap?: ReadonlyMap<string, string> | null;
++  currentUserId?: string | null;
++  onClose: () => void;
++}) {
++  // Local copy so the embedded card can flip to its resolved state before the
++  // sheet auto-closes (the pending list is refetched in the background).
++  const [resolved, setResolved] = useState<IssueThreadInteraction | null>(null);
++
++  const interaction = resolved ?? pending?.interaction ?? null;
++  const target = pending?.target ?? null;
++  const docIssueId =
++    target?.type === "issue_document" ? target.issueId ?? pending?.interaction.issueId ?? null : null;
++
++  const { data: revisions } = useQuery({
++    queryKey: ["pending-interaction-doc", docIssueId, target?.key, target?.revisionId],
++    queryFn: () => issuesApi.listDocumentRevisions(docIssueId!, target!.key),
++    enabled: !!docIssueId && target?.type === "issue_document" && !!pending,
++  });
++
++  const documentBody = useMemo(() => {
++    if (!revisions || revisions.length === 0) return null;
++    const byId = target?.revisionId ? revisions.find((rev) => rev.id === target.revisionId) : null;
++    if (byId) return byId.body;
++    return [...revisions].sort((a, b) => b.revisionNumber - a.revisionNumber)[0]?.body ?? null;
++  }, [revisions, target]);
++
++  const closeAndReset = useCallback(() => {
++    setResolved(null);
++    onClose();
++  }, [onClose]);
++
++  // Wrap the shared actions so resolving in the slide-over updates the embedded
++  // card (resolved state) and then auto-closes the sheet after a short beat.
++  const onResolve = useCallback((updated: IssueThreadInteraction) => {
++    setResolved(updated);
++    setTimeout(closeAndReset, 900);
++  }, [closeAndReset]);
++
++  const onAcceptInteraction = useCallback(
++    async (i: IssueThreadInteraction, keys?: string[], optionIds?: string[]) => {
++      onResolve(await actions.accept(i, keys, optionIds));
++    },
++    [actions, onResolve],
++  );
++  const onRejectInteraction = useCallback(
++    async (i: IssueThreadInteraction, reason?: string) => {
++      onResolve(await actions.reject(i, reason));
++    },
++    [actions, onResolve],
++  );
++  const onSubmitInteractionAnswers = useCallback(
++    async (i: IssueThreadInteraction, answers: AskUserQuestionsAnswer[]) => {
++      onResolve(await actions.submit(i, answers));
++    },
++    [actions, onResolve],
++  );
++  const onCancelInteraction = useCallback(
++    async (i: IssueThreadInteraction) => {
++      onResolve(await actions.cancel(i));
++    },
++    [actions, onResolve],
++  );
++
++  const open = !!pending;
++  const issueRef = pending?.issue;
++  const deepLink = issueRef?.identifier
++    ? `${createIssueDetailPath(issueRef.identifier)}#${pending?.anchor ?? ""}`
++    : null;
++
++  return (
++    <Sheet
++      open={open}
++      onOpenChange={(next) => {
++        if (!next) closeAndReset();
++      }}
++    >
++      <SheetContent side="right" className="flex w-full flex-col gap-0 p-0 sm:max-w-xl">
++        <SheetHeader className="border-b border-border px-4 py-3">
++          <SheetTitle>Decision</SheetTitle>
++          <SheetDescription className="sr-only">
++            Resolve the pending interaction without leaving the inbox.
++          </SheetDescription>
++        </SheetHeader>
++
++        {pending && interaction ? (
++          <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-4 py-4">
++            {/* Compact issue context */}
++            <div className="rounded-sm border border-border/70 bg-background/75 p-3">
++              <div className="flex items-start justify-between gap-2">
++                <div className="min-w-0">
++                  <div className="flex items-center gap-2 text-sm">
++                    {issueRef?.identifier ? (
++                      <span className="font-mono text-muted-foreground">{issueRef.identifier}</span>
++                    ) : null}
++                    <span className="truncate font-medium">{issueRef?.title}</span>
++                  </div>
++                  <div className="mt-1 text-xs text-muted-foreground">
++                    Requested by {requesterLabel(pending, userLabelMap)}
++                  </div>
++                  {interaction.summary ? (
++                    <div className="mt-1 line-clamp-2 text-xs text-muted-foreground">
++                      {interaction.summary}
++                    </div>
++                  ) : null}
++                </div>
++                {deepLink ? (
++                  <Button asChild variant="outline" size="sm" className="shrink-0">
++                    <Link to={deepLink}>
++                      Open in issue
++                      <SquareArrowOutUpRight className="ml-1 h-3.5 w-3.5" />
++                    </Link>
++                  </Button>
++                ) : null}
++              </div>
++            </div>
++
++            {/* The real interaction card — single source of truth, fully answerable. */}
++            <IssueThreadInteractionCard
++              interaction={interaction}
++              agentMap={agentMap}
++              currentUserId={currentUserId}
++              userLabelMap={userLabelMap}
++              onAcceptInteraction={onAcceptInteraction}
++              onRejectInteraction={onRejectInteraction}
++              onSubmitInteractionAnswers={onSubmitInteractionAnswers}
++              onCancelInteraction={onCancelInteraction}
++            />
++
++            {/* Targeted document (plan-bound confirmations only). */}
++            {target?.type === "issue_document" && documentBody ? (
++              <div className="rounded-sm border border-border/70">
++                <div className="border-b border-border/70 px-3 py-2 text-xs font-medium text-muted-foreground">
++                  Targeted document — {targetLabel(target)}
++                </div>
++                <div className="max-h-[40vh] overflow-y-auto px-3 py-3">
++                  <MarkdownBody>{documentBody}</MarkdownBody>
++                </div>
++              </div>
++            ) : null}
++          </div>
++        ) : null}
++      </SheetContent>
++    </Sheet>
++  );
++}
+diff --git a/ui/src/hooks/useInboxBadge.ts b/ui/src/hooks/useInboxBadge.ts
+index 1e401ed..05cf2ed 100644
+--- a/ui/src/hooks/useInboxBadge.ts
++++ b/ui/src/hooks/useInboxBadge.ts
+@@ -195,6 +195,13 @@ export function useInboxBadge(companyId: string | null | undefined) {
+     enabled: !!companyId,
+   });
+ 
++  const { data: pendingInteractions } = useQuery({
++    queryKey: queryKeys.pendingInteractions(companyId!),
++    queryFn: () => issuesApi.listPendingInteractions(companyId!),
++    enabled: !!companyId,
++  });
++  const pendingDecisions = pendingInteractions?.interactions.length ?? 0;
++
+   return useMemo(
+     () =>
+       computeInboxBadgeData({
+@@ -206,7 +213,8 @@ export function useInboxBadge(companyId: string | null | undefined) {
+         dismissedAlerts,
+         dismissedAtByKey,
+         currentUserId,
++        pendingDecisions,
+       }),
+-    [approvals, joinRequests, dashboard, heartbeatRuns, mineIssues, dismissedAlerts, dismissedAtByKey, currentUserId],
++    [approvals, joinRequests, dashboard, heartbeatRuns, mineIssues, dismissedAlerts, dismissedAtByKey, currentUserId, pendingDecisions],
+   );
+ }
+diff --git a/ui/src/lib/inbox.ts b/ui/src/lib/inbox.ts
+index 780aeb3..f355ed6 100644
+--- a/ui/src/lib/inbox.ts
++++ b/ui/src/lib/inbox.ts
+@@ -80,6 +80,7 @@ export interface InboxBadgeData {
+   failedRuns: number;
+   joinRequests: number;
+   mineIssues: number;
++  decisions: number;
+   alerts: number;
+ }
+ 
+@@ -1220,6 +1221,7 @@ export function computeInboxBadgeData({
+   dismissedAlerts,
+   dismissedAtByKey,
+   currentUserId,
++  pendingDecisions = 0,
+ }: {
+   approvals: Approval[];
+   joinRequests: JoinRequest[];
+@@ -1229,6 +1231,7 @@ export function computeInboxBadgeData({
+   dismissedAlerts: Set<string>;
+   dismissedAtByKey: ReadonlyMap<string, number>;
+   currentUserId?: string | null;
++  pendingDecisions?: number;
+ }): InboxBadgeData {
+   const actionableApprovals = approvals.filter(
+     (approval) =>
+@@ -1258,11 +1261,15 @@ export function computeInboxBadgeData({
+ 
+   return {
+     // The inbox badge reflects personal/actionable work, not company-wide health alerts.
+-    inbox: actionableApprovals + visibleJoinRequests + failedRuns + visibleMineIssues,
++    // Pending board decisions are surfaced here too: the whole point of Better Actions
++    // is making buried decisions visible. (Per-user "for me" scoping arrives with
++    // responder binding in KIN-4701 / Phase 3 — until then this is company-wide pending.)
++    inbox: actionableApprovals + visibleJoinRequests + failedRuns + visibleMineIssues + pendingDecisions,
+     approvals: actionableApprovals,
+     failedRuns,
+     joinRequests: visibleJoinRequests,
+     mineIssues: visibleMineIssues,
++    decisions: pendingDecisions,
+     alerts,
+   };
+ }
+diff --git a/ui/src/lib/queryKeys.ts b/ui/src/lib/queryKeys.ts
+index e98ba81..597f16c 100644
+--- a/ui/src/lib/queryKeys.ts
++++ b/ui/src/lib/queryKeys.ts
+@@ -188,6 +188,7 @@ export const queryKeys = {
+   userProfile: (companyId: string, userSlug: string) =>
+     ["user-profile", companyId, userSlug] as const,
+   sidebarBadges: (companyId: string) => ["sidebar-badges", companyId] as const,
++  pendingInteractions: (companyId: string) => ["pending-interactions", companyId] as const,
+   inboxDismissals: (companyId: string) => ["inbox-dismissals", companyId] as const,
+   activity: (companyId: string) => ["activity", companyId] as const,
+   costs: (companyId: string, from?: string, to?: string) =>
+diff --git a/ui/src/pages/Inbox.tsx b/ui/src/pages/Inbox.tsx
+index 3ad6be1..d25b94a 100644
+--- a/ui/src/pages/Inbox.tsx
++++ b/ui/src/pages/Inbox.tsx
+@@ -50,6 +50,7 @@ import {
+ } from "../lib/keyboardShortcuts";
+ import { EmptyState } from "../components/EmptyState";
+ import { IssueGroupHeader } from "../components/IssueGroupHeader";
++import { DecisionsSection, DECISIONS_GROUP_KEY } from "../components/DecisionsInbox";
+ import { PageSkeleton } from "../components/PageSkeleton";
+ import {
+   InboxIssueMetaLeading,
+@@ -721,6 +722,13 @@ export function Inbox() {
+     enabled: !!selectedCompanyId,
+   });
+ 
++  const { data: pendingInteractionsData } = useQuery({
++    queryKey: queryKeys.pendingInteractions(selectedCompanyId!),
++    queryFn: () => issuesApi.listPendingInteractions(selectedCompanyId!),
++    enabled: !!selectedCompanyId,
++  });
++  const pendingInteractions = pendingInteractionsData?.interactions ?? [];
++
+   const { data: projects } = useQuery({
+     queryKey: queryKeys.projects.list(selectedCompanyId!),
+     queryFn: () => projectsApi.list(selectedCompanyId!),
+@@ -856,6 +864,10 @@ export function Inbox() {
+     () => buildCompanyUserLabelMap(companyMembers?.users),
+     [companyMembers?.users],
+   );
++  const agentMap = useMemo(
++    () => new Map((agents ?? []).map((agent) => [agent.id, agent])),
++    [agents],
++  );
+   const companyUserProfileMap = useMemo(
+     () => buildCompanyUserProfileMap(companyMembers?.users),
+     [companyMembers?.users],
+@@ -2256,6 +2268,18 @@ export function Inbox() {
+         />
+       ) : null}
+ 
++      {tab === "mine" && pendingInteractions.length > 0 && (
++        <DecisionsSection
++          pendingInteractions={pendingInteractions}
++          collapsed={collapsedGroupKeys.has(DECISIONS_GROUP_KEY)}
++          onToggleCollapse={() => toggleGroupCollapse(DECISIONS_GROUP_KEY)}
++          agentMap={agentMap}
++          userLabelMap={companyUserLabelMap}
++          currentUserId={currentUserId}
++          companyId={selectedCompanyId}
++        />
++      )}
++
+       {tab !== "blocked" && !allLoaded && visibleSections.length === 0 && (
+         <PageSkeleton variant="inbox" />
+       )}
