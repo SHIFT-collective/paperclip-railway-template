@@ -20,7 +20,10 @@ RUN git clone --depth 1 --branch "${PAPERCLIP_REF}" "${PAPERCLIP_REPO}" .
 # KIN-4697: add GET /api/companies/:companyId/pending-interactions + the
 # listPendingForCompany service method (Better Actions Phase 1 backend) so the
 # inbox can surface pending board decisions outside their thread.
-# Both verified to apply cleanly against PAPERCLIP_REF=v2026.609.0. If you bump
+# KIN-4699: add the Decisions section (inbox "mine" tab) + inline yes/no rows +
+# Quick view slide-over (Better Actions Phase 1 UI), built on the KIN-4697
+# endpoint; UI-only, reuses the existing interaction accept/reject/respond routes.
+# All verified to apply cleanly against PAPERCLIP_REF=v2026.609.0. If you bump
 # PAPERCLIP_REF, re-verify each patch in patches/ still applies (the build fails
 # loudly here if one doesn't).
 COPY patches/ /tmp/paperclip-patches/
