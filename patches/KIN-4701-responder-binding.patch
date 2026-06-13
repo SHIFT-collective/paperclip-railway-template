@@ -1,0 +1,263 @@
+diff --git a/packages/db/src/migrations/0099_better_actions_responder_binding.sql b/packages/db/src/migrations/0099_better_actions_responder_binding.sql
+new file mode 100644
+index 0000000..abba3ff
+--- /dev/null
++++ b/packages/db/src/migrations/0099_better_actions_responder_binding.sql
+@@ -0,0 +1,2 @@
++ALTER TABLE "issue_thread_interactions" ADD COLUMN IF NOT EXISTS "responder_user_id" text;--> statement-breakpoint
++ALTER TABLE "approvals" ADD COLUMN IF NOT EXISTS "approver_user_id" text;
+diff --git a/packages/db/src/migrations/meta/_journal.json b/packages/db/src/migrations/meta/_journal.json
+index 96c9209..058b538 100644
+--- a/packages/db/src/migrations/meta/_journal.json
++++ b/packages/db/src/migrations/meta/_journal.json
+@@ -694,6 +694,13 @@
+       "when": 1780534200000,
+       "tag": "0098_project_icon",
+       "breakpoints": true
++    },
++    {
++      "idx": 99,
++      "version": "7",
++      "when": 1780534400000,
++      "tag": "0099_better_actions_responder_binding",
++      "breakpoints": true
+     }
+   ]
+ }
+diff --git a/packages/db/src/schema/approvals.ts b/packages/db/src/schema/approvals.ts
+index f4cd512..cdfedc6 100644
+--- a/packages/db/src/schema/approvals.ts
++++ b/packages/db/src/schema/approvals.ts
+@@ -10,6 +10,10 @@ export const approvals = pgTable(
+     type: text("type").notNull(),
+     requestedByAgentId: uuid("requested_by_agent_id").references(() => agents.id),
+     requestedByUserId: text("requested_by_user_id"),
++    // KIN-4701 (Better Actions Phase 3): the board user expected to decide this
++    // approval (parity with issue_thread_interactions.responder_user_id). Null
++    // preserves today's behavior — any board member may decide.
++    approverUserId: text("approver_user_id"),
+     status: text("status").notNull().default("pending"),
+     payload: jsonb("payload").$type<Record<string, unknown>>().notNull(),
+     decisionNote: text("decision_note"),
+diff --git a/packages/db/src/schema/issue_thread_interactions.ts b/packages/db/src/schema/issue_thread_interactions.ts
+index 7589595..0b9e49f 100644
+--- a/packages/db/src/schema/issue_thread_interactions.ts
++++ b/packages/db/src/schema/issue_thread_interactions.ts
+@@ -24,6 +24,9 @@ export const issueThreadInteractions = pgTable(
+     sourceRunId: uuid("source_run_id").references(() => heartbeatRuns.id, { onDelete: "set null" }),
+     title: text("title"),
+     summary: text("summary"),
++    // KIN-4701 (Better Actions Phase 3): the board user expected to decide this
++    // interaction. Null preserves today's behavior — any board member may decide.
++    responderUserId: text("responder_user_id"),
+     createdByAgentId: uuid("created_by_agent_id").references(() => agents.id),
+     createdByUserId: text("created_by_user_id"),
+     resolvedByAgentId: uuid("resolved_by_agent_id").references(() => agents.id),
+diff --git a/packages/shared/src/types/approval.ts b/packages/shared/src/types/approval.ts
+index 4554d36..1b0723d 100644
+--- a/packages/shared/src/types/approval.ts
++++ b/packages/shared/src/types/approval.ts
+@@ -6,6 +6,11 @@ export interface Approval {
+   type: ApprovalType;
+   requestedByAgentId: string | null;
+   requestedByUserId: string | null;
++  /**
++   * KIN-4701 (Better Actions Phase 3): board user expected to decide this
++   * approval. Null means any board member may decide (today's behavior).
++   */
++  approverUserId: string | null;
+   status: ApprovalStatus;
+   payload: Record<string, unknown>;
+   decisionNote: string | null;
+diff --git a/packages/shared/src/types/issue.ts b/packages/shared/src/types/issue.ts
+index 61608be..efa4647 100644
+--- a/packages/shared/src/types/issue.ts
++++ b/packages/shared/src/types/issue.ts
+@@ -669,6 +669,11 @@ export interface IssueCommentPresentation {
+ export interface IssueThreadInteractionActorFields {
+   createdByAgentId?: string | null;
+   createdByUserId?: string | null;
++  /**
++   * KIN-4701 (Better Actions Phase 3): board user expected to decide this
++   * interaction. Null means any board member may decide (today's behavior).
++   */
++  responderUserId?: string | null;
+   resolvedByAgentId?: string | null;
+   resolvedByUserId?: string | null;
+ }
+@@ -908,6 +913,12 @@ export interface PendingInteraction {
+   issue: PendingInteractionIssueRef;
+   requestedByAgent: PendingInteractionAgentRef | null;
+   requestedByUserId: string | null;
++  /**
++   * KIN-4701 (Better Actions Phase 3): board user this decision is aimed at, or
++   * null when any board member may decide. Drives the "Waiting on you — Approver"
++   * badge and the "Needs my decision" filter.
++   */
++  responderUserId: string | null;
+   /** Seconds since the interaction was created, computed at query time. */
+   ageSeconds: number;
+   /** Document/plan target for plan-bound confirmations; null for plain decisions. */
+diff --git a/packages/shared/src/validators/approval.ts b/packages/shared/src/validators/approval.ts
+index d24efad..a5c97f2 100644
+--- a/packages/shared/src/validators/approval.ts
++++ b/packages/shared/src/validators/approval.ts
+@@ -5,6 +5,9 @@ import { multilineTextSchema } from "./text.js";
+ export const createApprovalSchema = z.object({
+   type: z.enum(APPROVAL_TYPES),
+   requestedByAgentId: z.string().uuid().optional().nullable(),
++  // KIN-4701 (Better Actions Phase 3): board user expected to decide this
++  // approval. Null/absent preserves today's behavior (any board member decides).
++  approverUserId: z.string().trim().max(255).optional().nullable(),
+   payload: z.record(z.string(), z.unknown()),
+   issueIds: z.array(z.string().uuid()).optional(),
+ });
+diff --git a/packages/shared/src/validators/issue.ts b/packages/shared/src/validators/issue.ts
+index 7d7454c..5167447 100644
+--- a/packages/shared/src/validators/issue.ts
++++ b/packages/shared/src/validators/issue.ts
+@@ -862,6 +862,7 @@ export const createIssueThreadInteractionSchema = z.discriminatedUnion("kind", [
+     sourceRunId: z.string().uuid().nullable().optional(),
+     title: z.string().trim().max(240).nullable().optional(),
+     summary: z.string().trim().max(1000).nullable().optional(),
++    responderUserId: z.string().trim().max(255).nullable().optional(),
+     continuationPolicy: issueThreadInteractionContinuationPolicySchema.optional().default("wake_assignee"),
+     payload: suggestTasksPayloadSchema,
+   }),
+@@ -872,6 +873,7 @@ export const createIssueThreadInteractionSchema = z.discriminatedUnion("kind", [
+     sourceRunId: z.string().uuid().nullable().optional(),
+     title: z.string().trim().max(240).nullable().optional(),
+     summary: z.string().trim().max(1000).nullable().optional(),
++    responderUserId: z.string().trim().max(255).nullable().optional(),
+     continuationPolicy: issueThreadInteractionContinuationPolicySchema.optional().default("wake_assignee"),
+     payload: askUserQuestionsPayloadSchema,
+   }),
+@@ -882,6 +884,7 @@ export const createIssueThreadInteractionSchema = z.discriminatedUnion("kind", [
+     sourceRunId: z.string().uuid().nullable().optional(),
+     title: z.string().trim().max(240).nullable().optional(),
+     summary: z.string().trim().max(1000).nullable().optional(),
++    responderUserId: z.string().trim().max(255).nullable().optional(),
+     continuationPolicy: issueThreadInteractionContinuationPolicySchema.optional().default("none"),
+     payload: requestConfirmationPayloadSchema,
+   }),
+@@ -892,6 +895,7 @@ export const createIssueThreadInteractionSchema = z.discriminatedUnion("kind", [
+     sourceRunId: z.string().uuid().nullable().optional(),
+     title: z.string().trim().max(240).nullable().optional(),
+     summary: z.string().trim().max(1000).nullable().optional(),
++    responderUserId: z.string().trim().max(255).nullable().optional(),
+     continuationPolicy: issueThreadInteractionContinuationPolicySchema.optional().default("wake_assignee"),
+     payload: requestCheckboxConfirmationPayloadSchema,
+   }),
+diff --git a/server/src/routes/issues.ts b/server/src/routes/issues.ts
+index 0719a0e..7d0fa40 100644
+--- a/server/src/routes/issues.ts
++++ b/server/src/routes/issues.ts
+@@ -2303,11 +2303,13 @@ export function issueRoutes(
+   });
+ 
+   // Pending issue-thread interactions across the company, for the inbox "Decisions"
+-  // section (KIN-4697 / KIN-4606 Phase 1). The `responderUserId` query param is accepted
+-  // for forward compatibility — only `me`/absent is meaningful until responder binding
+-  // ships in Phase 3, so this returns every pending board-facing interaction in the
+-  // company. Resolution still happens via the existing per-issue accept/reject/respond
+-  // routes, so continuation wakes behave identically whether resolved here or in-thread.
++  // section (KIN-4697 / KIN-4606 Phase 1). KIN-4701 (Phase 3): the `responderUserId`
++  // query param now filters to interactions actionable by that board user — those bound
++  // to them plus unbound ("any board member may decide") interactions. `me` resolves to
++  // the calling board actor; absent returns every pending interaction (the "Awaiting
++  // board" company view). Resolution still happens via the existing per-issue
++  // accept/reject/respond routes, so continuation wakes behave identically whether
++  // resolved here or in-thread.
+   router.get("/companies/:companyId/pending-interactions", async (req, res) => {
+     const companyId = req.params.companyId as string;
+     assertCompanyAccess(req, companyId);
+@@ -2320,7 +2322,14 @@ export function issueRoutes(
+       res.status(403).json({ error: "Pending interactions are outside this actor's authorization boundary" });
+       return;
+     }
+-    const interactions = await issueThreadInteractionsSvc.listPendingForCompany(companyId);
++    const responderUserFilterRaw = req.query.responderUserId as string | undefined;
++    const responderUserId =
++      responderUserFilterRaw === "me" && req.actor.type === "board"
++        ? req.actor.userId
++        : responderUserFilterRaw ?? null;
++    const interactions = await issueThreadInteractionsSvc.listPendingForCompany(companyId, {
++      responderUserId,
++    });
+     res.json({ interactions });
+   });
+ 
+diff --git a/server/src/services/issue-thread-interactions.ts b/server/src/services/issue-thread-interactions.ts
+index 13d9e14..34948a7 100644
+--- a/server/src/services/issue-thread-interactions.ts
++++ b/server/src/services/issue-thread-interactions.ts
+@@ -1,5 +1,5 @@
+ import { isDeepStrictEqual } from "node:util";
+-import { and, asc, eq, inArray, isNotNull, isNull, notInArray } from "drizzle-orm";
++import { and, asc, eq, inArray, isNotNull, isNull, notInArray, or } from "drizzle-orm";
+ import type { Db } from "@paperclipai/db";
+ import {
+   agents,
+@@ -108,6 +108,7 @@ function isEquivalentCreateRequest(
+     && (row.sourceRunId ?? null) === (input.sourceRunId ?? null)
+     && (row.title ?? null) === (input.title ?? null)
+     && (row.summary ?? null) === (input.summary ?? null)
++    && (row.responderUserId ?? null) === (input.responderUserId ?? null)
+     && (row.createdByAgentId ?? null) === (actor.agentId ?? null)
+     && (row.createdByUserId ?? null) === (actor.userId ?? null)
+     && isDeepStrictEqual(row.payload, input.payload)
+@@ -763,15 +764,26 @@ export function issueThreadInteractionService(db: Db) {
+      * target for plan-bound confirmations. Interactions on terminal (done/cancelled) or
+      * hidden issues are excluded — those decisions are no longer actionable.
+      *
+-     * Note (KIN-4697): responder binding (`responderUserId`) ships in Phase 3. Until then
+-     * any board member may decide, so this returns every pending board-facing interaction
+-     * in the company regardless of the `responderUserId=me` filter passed by the caller.
++     * KIN-4701 (Better Actions Phase 3): responder binding is now honored. When
++     * `responderUserId` is supplied, this returns interactions actionable by that
++     * board user — those explicitly bound to them, plus unbound interactions
++     * (`responder_user_id IS NULL`) that any board member may still decide. With no
++     * filter (the "Awaiting board" company view) every pending interaction is returned.
++     * The "Waiting on you — Approver" badge and the strict "Needs my decision" filter
++     * are driven client-side off the per-row `responderUserId` the result now carries.
+      */
+     listPendingForCompany: async (
+       companyId: string,
+-      opts?: { now?: Date },
++      opts?: { now?: Date; responderUserId?: string | null },
+     ): Promise<PendingInteraction[]> => {
+       const now = opts?.now ?? new Date();
++      const responderFilter =
++        opts?.responderUserId != null
++          ? or(
++              isNull(issueThreadInteractions.responderUserId),
++              eq(issueThreadInteractions.responderUserId, opts.responderUserId),
++            )
++          : undefined;
+       const rows = await db
+         .select({
+           interaction: issueThreadInteractions,
+@@ -789,6 +801,7 @@ export function issueThreadInteractionService(db: Db) {
+           eq(issueThreadInteractions.status, "pending"),
+           notInArray(issues.status, ["done", "cancelled"]),
+           isNull(issues.hiddenAt),
++          ...(responderFilter ? [responderFilter] : []),
+         ))
+         .orderBy(asc(issueThreadInteractions.createdAt), asc(issueThreadInteractions.id));
+ 
+@@ -812,6 +825,7 @@ export function issueThreadInteractionService(db: Db) {
+           },
+           requestedByAgent: row.agentId ? { id: row.agentId, name: row.agentName ?? "" } : null,
+           requestedByUserId: interaction.createdByUserId ?? null,
++          responderUserId: interaction.responderUserId ?? null,
+           ageSeconds,
+           target,
+         } satisfies PendingInteraction;
+@@ -891,6 +905,7 @@ export function issueThreadInteractionService(db: Db) {
+             sourceRunId: data.sourceRunId ?? null,
+             title: data.title ?? null,
+             summary: data.summary ?? null,
++            responderUserId: data.responderUserId ?? null,
+             createdByAgentId: actor.agentId ?? null,
+             createdByUserId: actor.userId ?? null,
+             payload: data.payload,
