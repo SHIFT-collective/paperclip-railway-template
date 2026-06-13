@@ -1,0 +1,259 @@
+diff --git a/ui/src/components/DecisionsInbox.tsx b/ui/src/components/DecisionsInbox.tsx
+index 71e0602..62e172e 100644
+--- a/ui/src/components/DecisionsInbox.tsx
++++ b/ui/src/components/DecisionsInbox.tsx
+@@ -164,16 +164,35 @@ export function useDecisionInteractionActions(companyId: string | null | undefin
+ 
+ type DecisionActions = ReturnType<typeof useDecisionInteractionActions>;
+ 
+-function DecisionInboxRow({
++/**
++ * Minimal action surface a row actually uses (inline accept / reject). The inbox
++ * passes the full {@link useDecisionInteractionActions} result; the issue-detail
++ * "Pending actions" strip passes thin adapters over the page's own optimistic
++ * handlers so resolving on the strip behaves identically to resolving on the card.
++ */
++export interface DecisionRowActions {
++  accept: (
++    interaction: IssueThreadInteraction,
++    selectedClientKeys?: string[],
++    selectedOptionIds?: string[],
++  ) => Promise<unknown>;
++  reject: (interaction: IssueThreadInteraction, reason?: string) => Promise<unknown>;
++}
++
++export function DecisionInboxRow({
+   pending,
+   actions,
+   userLabelMap,
+   onOpenQuickView,
++  seeMoreLabel = "See question",
+ }: {
+   pending: PendingInteraction;
+-  actions: DecisionActions;
++  actions: DecisionRowActions;
+   userLabelMap?: ReadonlyMap<string, string> | null;
+   onOpenQuickView: (pending: PendingInteraction) => void;
++  /** Label for the non-inline action button — "See question" (inbox → quick view)
++   * or "Jump to" (issue strip → scroll to the full card via its anchor). */
++  seeMoreLabel?: string;
+ }) {
+   const { interaction } = pending;
+   const Icon = KIND_ICON[interaction.kind];
+@@ -272,7 +291,7 @@ function DecisionInboxRow({
+             </>
+           ) : (
+             <Button variant="outline" className="h-8 px-3" onClick={() => onOpenQuickView(pending)}>
+-              See question
++              {seeMoreLabel}
+             </Button>
+           )}
+         </div>
+@@ -351,7 +370,7 @@ function DecisionInboxRow({
+             className="h-8 flex-1 px-3"
+             onClick={() => onOpenQuickView(pending)}
+           >
+-            See question
++            {seeMoreLabel}
+           </Button>
+         ) : null}
+       </div>
+diff --git a/ui/src/components/PendingActionsStrip.tsx b/ui/src/components/PendingActionsStrip.tsx
+new file mode 100644
+index 0000000..0614b66
+--- /dev/null
++++ b/ui/src/components/PendingActionsStrip.tsx
+@@ -0,0 +1,135 @@
++import { useCallback, useMemo, useState } from "react";
++import type {
++  Agent,
++  IssueThreadInteraction,
++  PendingInteraction,
++} from "@paperclipai/shared";
++import { IssueGroupHeader } from "./IssueGroupHeader";
++import {
++  DecisionInboxRow,
++  type DecisionRowActions,
++} from "./DecisionsInbox";
++
++/**
++ * Phase 2 of Better Actions (KIN-4700): a pinned "Pending actions" strip rendered
++ * above the comment thread on the issue detail page whenever the issue has pending
++ * interactions awaiting a response — so a decision never hides somewhere in the
++ * scrollback.
++ *
++ * It deliberately reuses the Phase 1 {@link DecisionInboxRow}: plain yes/no
++ * confirmations resolve inline (same accept / reject affordances as the inbox),
++ * and everything richer (questions, plan-bound confirmations, checkbox selections,
++ * suggested tasks) routes to the full interaction card already in the thread via
++ * its `#interaction-<id>` anchor — no forked card, single source of truth.
++ *
++ * Resolution flows through the issue page's own optimistic accept / reject
++ * handlers (passed in as {@link onAccept} / {@link onReject}), so resolving on the
++ * strip behaves exactly like resolving on the card itself.
++ */
++export function PendingActionsStrip({
++  interactions,
++  onAccept,
++  onReject,
++  onJump,
++  agentMap,
++  userLabelMap,
++}: {
++  interactions: IssueThreadInteraction[];
++  onAccept: (interaction: IssueThreadInteraction) => Promise<unknown>;
++  onReject: (interaction: IssueThreadInteraction, reason?: string) => Promise<unknown>;
++  /** Scroll to / deep-link the full interaction card for `interaction-<id>`. */
++  onJump: (anchor: string) => void;
++  agentMap?: Map<string, Agent>;
++  userLabelMap?: ReadonlyMap<string, string> | null;
++}) {
++  const [collapsed, setCollapsed] = useState(false);
++
++  // Only interactions still awaiting a response; oldest-first (FIFO) so nothing
++  // starves and the strip order is stable across re-renders.
++  const ordered = useMemo(
++    () =>
++      interactions
++        .filter((interaction) => interaction.status === "pending")
++        .sort((a, b) => {
++          const at = new Date(a.createdAt).getTime();
++          const bt = new Date(b.createdAt).getTime();
++          return at - bt;
++        }),
++    [interactions],
++  );
++
++  // Adapt raw thread interactions into the PendingInteraction shape the shared row
++  // expects. The issue identifier chip is suppressed (we are already on the issue);
++  // `target` only needs populating for plain confirmations, which is all the row's
++  // inline-vs-jump decision inspects.
++  const pendings = useMemo<PendingInteraction[]>(
++    () =>
++      ordered.map((interaction) => {
++        const agentId = interaction.createdByAgentId ?? null;
++        const agent = agentId ? agentMap?.get(agentId) : null;
++        return {
++          interaction,
++          anchor: `interaction-${interaction.id}`,
++          issue: { id: interaction.issueId, identifier: null, title: "", status: "" },
++          requestedByAgent: agent ? { id: agent.id, name: agent.name } : null,
++          requestedByUserId: interaction.createdByUserId ?? null,
++          ageSeconds: 0,
++          target:
++            interaction.kind === "request_confirmation"
++              ? interaction.payload.target ?? null
++              : null,
++        } satisfies PendingInteraction;
++      }),
++    [ordered, agentMap],
++  );
++
++  const actions = useMemo<DecisionRowActions>(
++    () => ({
++      accept: (interaction) => onAccept(interaction),
++      reject: (interaction, reason) => onReject(interaction, reason),
++    }),
++    [onAccept, onReject],
++  );
++
++  const handleOpen = useCallback(
++    (pending: PendingInteraction) => onJump(pending.anchor),
++    [onJump],
++  );
++
++  if (pendings.length === 0) return null;
++
++  return (
++    <div
++      className="overflow-hidden rounded-xl border border-border border-l-2 border-l-sky-500/70 bg-card"
++      data-testid="pending-actions-strip"
++    >
++      <div className="px-3 sm:px-4">
++        <IssueGroupHeader
++          label={`Pending actions · ${pendings.length}`}
++          collapsible
++          collapsed={collapsed}
++          onToggle={() => setCollapsed((value) => !value)}
++          trailing={
++            <span className="text-xs font-normal normal-case tracking-normal text-muted-foreground">
++              Needs your response
++            </span>
++          }
++        />
++      </div>
++      {!collapsed ? (
++        <div>
++          {pendings.map((pending) => (
++            <DecisionInboxRow
++              key={pending.interaction.id}
++              pending={pending}
++              actions={actions}
++              userLabelMap={userLabelMap}
++              onOpenQuickView={handleOpen}
++              seeMoreLabel="Jump to"
++            />
++          ))}
++        </div>
++      ) : null}
++    </div>
++  );
++}
+diff --git a/ui/src/pages/IssueDetail.tsx b/ui/src/pages/IssueDetail.tsx
+index a286121..ee119eb 100644
+--- a/ui/src/pages/IssueDetail.tsx
++++ b/ui/src/pages/IssueDetail.tsx
+@@ -76,6 +76,7 @@ import { IssueOutputSection } from "../components/issue-output/IssueOutputSectio
+ import { isImageAttachment } from "../lib/issue-attachments";
+ import { getPromotedOutputAttachmentIds } from "../lib/issue-output";
+ import { IssueSiblingNavigation } from "../components/IssueSiblingNavigation";
++import { PendingActionsStrip } from "../components/PendingActionsStrip";
+ import { IssuesList } from "../components/IssuesList";
+ import { AgentIcon } from "../components/AgentIconPicker";
+ import { IssueReferenceActivitySummary } from "../components/IssueReferenceActivitySummary";
+@@ -909,8 +910,45 @@ const IssueDetailChatTab = memo(function IssueDetailChatTab({
+     [resolvedActivity],
+   );
+ 
++  // KIN-4700 — pinned "Pending actions" strip. Jumping routes to the full card
++  // already in the thread via its `#interaction-<id>` anchor: drive the router
++  // hash (so IssueChatThread's deep-link effect handles a virtualized thread) and
++  // also scroll directly for immediate feedback when the card is already mounted.
++  const navigate = useNavigate();
++  const onJumpToInteraction = useCallback(
++    (anchor: string) => {
++      navigate({ hash: `#${anchor}` });
++      if (typeof document !== "undefined") {
++        requestAnimationFrame(() => {
++          document.getElementById(anchor)?.scrollIntoView({ behavior: "smooth", block: "center" });
++        });
++      }
++    },
++    [navigate],
++  );
++  // The strip only ever resolves plain yes/no confirmations inline (everything
++  // else jumps to the card), so the interaction handed back is always actionable.
++  const onStripAccept = useCallback(
++    (interaction: IssueThreadInteraction) =>
++      onAcceptInteraction(interaction as ActionableIssueThreadInteraction),
++    [onAcceptInteraction],
++  );
++  const onStripReject = useCallback(
++    (interaction: IssueThreadInteraction, reason?: string) =>
++      onRejectInteraction(interaction as ActionableIssueThreadInteraction, reason),
++    [onRejectInteraction],
++  );
++
+   return (
+     <div className="space-y-3">
++      <PendingActionsStrip
++        interactions={interactions}
++        onAccept={onStripAccept}
++        onReject={onStripReject}
++        onJump={onJumpToInteraction}
++        agentMap={agentMap}
++        userLabelMap={userLabelMap}
++      />
+       {hasOlderComments ? (
+         <div className="flex justify-center">
+           <Button
