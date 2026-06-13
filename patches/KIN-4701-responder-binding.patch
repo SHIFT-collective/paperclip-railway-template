@@ -65,7 +65,7 @@ index 4554d36..1b0723d 100644
 +   * KIN-4701 (Better Actions Phase 3): board user expected to decide this
 +   * approval. Null means any board member may decide (today's behavior).
 +   */
-+  approverUserId: string | null;
++  approverUserId?: string | null;
    status: ApprovalStatus;
    payload: Record<string, unknown>;
    decisionNote: string | null;
@@ -94,7 +94,7 @@ index 61608be..efa4647 100644
 +   * null when any board member may decide. Drives the "Waiting on you — Approver"
 +   * badge and the "Needs my decision" filter.
 +   */
-+  responderUserId: string | null;
++  responderUserId?: string | null;
    /** Seconds since the interaction was created, computed at query time. */
    ageSeconds: number;
    /** Document/plan target for plan-bound confirmations; null for plain decisions. */
