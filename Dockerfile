@@ -23,6 +23,13 @@ RUN git clone --depth 1 --branch "${PAPERCLIP_REF}" "${PAPERCLIP_REPO}" .
 # KIN-4699: add the Decisions section (inbox "mine" tab) + inline yes/no rows +
 # Quick view slide-over (Better Actions Phase 1 UI), built on the KIN-4697
 # endpoint; UI-only, reuses the existing interaction accept/reject/respond routes.
+# KIN-4700: pinned "Pending actions" strip on the issue detail page (Better
+# Actions Phase 2 UI), reusing the Phase 1 decision row.
+# KIN-4701: responder/approver binding backend (Better Actions Phase 3) — adds
+# nullable responder_user_id / approver_user_id + responderUserId=me filtering.
+# KIN-4780: "Waiting on you — Approver" badge, "Needs my decision" filter, and
+# derived "Awaiting board" chip (Better Actions Phase 3 UI), built on KIN-4701's
+# responder binding; UI-only.
 # All verified to apply cleanly against PAPERCLIP_REF=v2026.609.0. If you bump
 # PAPERCLIP_REF, re-verify each patch in patches/ still applies (the build fails
 # loudly here if one doesn't).
