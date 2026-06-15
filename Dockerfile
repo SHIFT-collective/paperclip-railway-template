@@ -62,9 +62,18 @@ RUN apt-get update \
     git \
     jq \
     openssh-client \
+    python3 \
+    python3-pip \
     ripgrep \
     && rm -rf /var/lib/apt/lists/*
 RUN corepack enable
+
+# KIN-4879: bake duckdb into the runtime image so it survives container
+# rebuilds (/usr is not on the persistent /paperclip volume). Used by the
+# kk_permissions weekly permissions-cache refresh routine (KIN-4878).
+# Keep this version aligned with kk_permissions/requirements.txt (bump both
+# together). --break-system-packages is required on Debian bookworm (PEP 668).
+RUN pip3 install --no-cache-dir --break-system-packages duckdb==1.5.3
 
 WORKDIR /app
 COPY --from=paperclip-build /paperclip /app
