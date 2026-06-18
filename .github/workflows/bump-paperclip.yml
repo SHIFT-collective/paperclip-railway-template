@@ -2,8 +2,10 @@ name: Bump Paperclip upstream
 
 on:
   schedule:
-    # Mondays at 09:00 UTC.
-    - cron: "0 9 * * 1"
+    # Tuesdays at 07:00 UTC = 09:00 CEST.
+    # NOTE: GitHub Actions cron is always UTC and does NOT observe DST, so during
+    # standard time (CET, late Oct–late Mar) this fires at 08:00 local instead of 09:00.
+    - cron: "0 7 * * 2"
   workflow_dispatch:
 
 permissions:
