@@ -1,5 +1,5 @@
 diff --git a/server/src/__tests__/authorization-service.test.ts b/server/src/__tests__/authorization-service.test.ts
-index 2bba3349..0f39080a 100644
+index 426ab9c..b4a5108 100644
 --- a/server/src/__tests__/authorization-service.test.ts
 +++ b/server/src/__tests__/authorization-service.test.ts
 @@ -323,6 +323,102 @@ describeEmbeddedPostgres("authorization service", () => {
@@ -106,7 +106,7 @@ index 2bba3349..0f39080a 100644
      const company = await createCompany(db, "LowTrustOtherResources");
      const project = await createProject(db, company.id, "Allowed");
 diff --git a/server/src/__tests__/issue-agent-mutation-ownership-routes.test.ts b/server/src/__tests__/issue-agent-mutation-ownership-routes.test.ts
-index 31bf37ff..2508993e 100644
+index 771eacc..1f7b7b4 100644
 --- a/server/src/__tests__/issue-agent-mutation-ownership-routes.test.ts
 +++ b/server/src/__tests__/issue-agent-mutation-ownership-routes.test.ts
 @@ -317,12 +317,14 @@ describe("agent issue mutation checkout ownership", () => {
@@ -142,7 +142,7 @@ index 31bf37ff..2508993e 100644
      [
        "document upsert",
        (app: express.Express) =>
-@@ -914,7 +918,6 @@ describe("agent issue mutation checkout ownership", () => {
+@@ -975,7 +979,6 @@ describe("agent issue mutation checkout ownership", () => {
  
    it.each([
      ["todo", "patch", (app: express.Express) => request(app).patch(`/api/issues/${issueId}`).send({ title: "Todo update" })],
@@ -150,7 +150,7 @@ index 31bf37ff..2508993e 100644
      ["blocked", "patch", (app: express.Express) => request(app).patch(`/api/issues/${issueId}`).send({ title: "Blocked update" })],
    ])("rejects peer agent %s issue %s mutations outside active checkout ownership", async (status, _kind, sendRequest) => {
      mockIssueService.getById.mockResolvedValue(makeIssue({ status: status as "todo" | "blocked", assigneeAgentId: ownerAgentId }));
-@@ -928,6 +931,47 @@ describe("agent issue mutation checkout ownership", () => {
+@@ -989,6 +992,47 @@ describe("agent issue mutation checkout ownership", () => {
      expect(mockIssueService.addComment).not.toHaveBeenCalled();
    });
  
@@ -199,7 +199,7 @@ index 31bf37ff..2508993e 100644
      mockIssueService.getById.mockResolvedValue(makeIssue({ assigneeAgentId: null }));
      mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({
 diff --git a/server/src/__tests__/issue-comment-reopen-routes.test.ts b/server/src/__tests__/issue-comment-reopen-routes.test.ts
-index 4043d86a..cd7a658f 100644
+index 594fdef..8223a2e 100644
 --- a/server/src/__tests__/issue-comment-reopen-routes.test.ts
 +++ b/server/src/__tests__/issue-comment-reopen-routes.test.ts
 @@ -522,7 +522,10 @@ describe.sequential("issue comment reopen routes", () => {
@@ -228,7 +228,7 @@ index 4043d86a..cd7a658f 100644
      expect(mockHeartbeatService.wakeup).not.toHaveBeenCalled();
    });
  
-@@ -963,7 +966,9 @@ describe.sequential("issue comment reopen routes", () => {
+@@ -1246,7 +1249,9 @@ describe.sequential("issue comment reopen routes", () => {
      );
    });
  
@@ -239,7 +239,7 @@ index 4043d86a..cd7a658f 100644
      mockIssueService.getById.mockResolvedValue(makeIssue("done"));
      mockIssueService.addComment.mockResolvedValue({
        id: "comment-1",
-@@ -990,11 +995,13 @@ describe.sequential("issue comment reopen routes", () => {
+@@ -1273,11 +1278,13 @@ describe.sequential("issue comment reopen routes", () => {
        .patch("/api/issues/11111111-1111-4111-8111-111111111111")
        .send({ comment: "hello" });
  
@@ -259,10 +259,10 @@ index 4043d86a..cd7a658f 100644
  
    it("does not move dependency-blocked issues to todo via the PATCH comment path", async () => {
 diff --git a/server/src/routes/issues.ts b/server/src/routes/issues.ts
-index 6241b79f..6ef00a96 100644
+index 75da8f5..d59b57b 100644
 --- a/server/src/routes/issues.ts
 +++ b/server/src/routes/issues.ts
-@@ -704,6 +704,14 @@ function isClosedIssueStatus(status: string | null | undefined): status is "done
+@@ -743,6 +743,14 @@ function isClosedIssueStatus(status: string | null | undefined): status is "done
    return status === "done" || status === "cancelled";
  }
  
@@ -277,7 +277,7 @@ index 6241b79f..6ef00a96 100644
  function shouldImplicitlyMoveCommentedIssueToTodo(input: {
    issueStatus: string | null | undefined;
    assigneeAgentId: string | null | undefined;
-@@ -1658,7 +1666,7 @@ export function issueRoutes(
+@@ -1775,7 +1783,7 @@ export function issueRoutes(
        assigneeUserId: string | null;
        status: string;
      },
@@ -286,7 +286,7 @@ index 6241b79f..6ef00a96 100644
    ) {
      return access.decide({
        actor: req.actor,
-@@ -1690,6 +1698,25 @@ export function issueRoutes(
+@@ -1807,6 +1815,25 @@ export function issueRoutes(
      return false;
    }
  
@@ -312,7 +312,7 @@ index 6241b79f..6ef00a96 100644
    async function filterIssuesForActor<T extends Parameters<typeof decideIssueAccess>[1]>(req: Request, rows: T[]) {
      const decisions = await Promise.all(rows.map((issue) => decideIssueAccess(req, issue, "issue:read")));
      return rows.filter((_, index) => decisions[index]?.allowed);
-@@ -4638,7 +4665,11 @@ export function issueRoutes(
+@@ -4800,7 +4827,11 @@ export function issueRoutes(
      }
      assertCompanyAccess(req, existing.companyId);
      assertNoAgentHostWorkspaceCommandMutation(req, collectIssueWorkspaceCommandPaths(req.body));
@@ -325,7 +325,7 @@ index 6241b79f..6ef00a96 100644
      if (!(await assertCheapRecoveryIssueAssigneeProfileAllowed(req, res, existing, req.body))) return;
  
      const actor = getActorInfo(req);
-@@ -6440,7 +6471,16 @@ export function issueRoutes(
+@@ -6624,7 +6655,16 @@ export function issueRoutes(
        return;
      }
      assertCompanyAccess(req, issue.companyId);
@@ -343,35 +343,19 @@ index 6241b79f..6ef00a96 100644
      if (!assertStructuredCommentFieldsAllowed(req, res, {
        presentation: req.body.presentation,
        metadata: req.body.metadata,
-@@ -6474,15 +6514,18 @@ export function issueRoutes(
-     const shouldResumeInProgressScheduledRetry =
-       !!scheduledRetryForHumanComment &&
-       scheduledRetryForHumanComment.agentId === issue.assigneeAgentId;
+@@ -6666,7 +6706,10 @@ export function issueRoutes(
+       actorType: actor.actorType,
+       actorId: actor.actorId,
+     });
 +    // suppress implicit status moves for commenters without mutate authority so a
 +    // foreign (e.g. mention-woken) commenter cannot flip another agent's status
      const effectiveMoveToTodoRequested =
--      explicitMoveToTodoRequested ||
--      shouldImplicitlyMoveCommentedIssueToTodo({
--        issueStatus: issue.status,
--        assigneeAgentId: issue.assigneeAgentId,
--        actorType: actor.actorType,
--        actorId: actor.actorId,
--      }) ||
--      shouldResumeInProgressScheduledRetry;
 +      commenterCanMutate &&
-+      (explicitMoveToTodoRequested ||
-+        shouldImplicitlyMoveCommentedIssueToTodo({
-+          issueStatus: issue.status,
-+          assigneeAgentId: issue.assigneeAgentId,
-+          actorType: actor.actorType,
-+          actorId: actor.actorId,
-+        }) ||
-+        shouldResumeInProgressScheduledRetry);
-     const hasUnresolvedFirstClassBlockers =
-       isBlocked && effectiveMoveToTodoRequested
-         ? (await svc.getDependencyReadiness(issue.id)).unresolvedBlockerCount > 0
+       !assigneeSelfCommentOnTerminal &&
+       (explicitMoveToTodoRequested ||
+         shouldImplicitlyMoveCommentedIssueToTodo({
 diff --git a/server/src/services/authorization.ts b/server/src/services/authorization.ts
-index 157c5d3c..5e5a0616 100644
+index 50aff18..d00d6fa 100644
 --- a/server/src/services/authorization.ts
 +++ b/server/src/services/authorization.ts
 @@ -46,6 +46,7 @@ export type AuthorizationAction =
@@ -382,7 +366,7 @@ index 157c5d3c..5e5a0616 100644
    | "issue:read"
    | "project:read"
    | "runtime:manage"
-@@ -118,6 +119,7 @@ function permissionForAction(action: AuthorizationAction): PermissionKey | null
+@@ -119,6 +120,7 @@ function permissionForAction(action: AuthorizationAction): PermissionKey | null
      return null;
    }
    if (action === "issue:mutate") return null;
@@ -390,7 +374,7 @@ index 157c5d3c..5e5a0616 100644
    return action;
  }
  
-@@ -752,7 +754,11 @@ export function authorizationService(db: Db) {
+@@ -753,7 +755,11 @@ export function authorizationService(db: Db) {
          : lowTrustDeny("Project is outside this low-trust boundary.");
      }
  
@@ -403,7 +387,7 @@ index 157c5d3c..5e5a0616 100644
        if (input.resource.type !== "issue") {
          return lowTrustDeny("Low-trust issue access is missing an issue resource.");
        }
-@@ -1024,6 +1030,7 @@ export function authorizationService(db: Db) {
+@@ -1093,6 +1099,7 @@ export function authorizationService(db: Db) {
          input.action === "agent:wake" ||
          input.action === "company_scope:read" ||
          input.action === "issue:read" ||
@@ -411,7 +395,7 @@ index 157c5d3c..5e5a0616 100644
          input.action === "project:read" ||
          input.action === "runtime:manage" ||
          input.action === "secrets:read"
-@@ -1036,6 +1043,7 @@ export function authorizationService(db: Db) {
+@@ -1105,6 +1112,7 @@ export function authorizationService(db: Db) {
        input.action === "agent:read" ||
        input.action === "company_scope:read" ||
        input.action === "issue:read" ||
