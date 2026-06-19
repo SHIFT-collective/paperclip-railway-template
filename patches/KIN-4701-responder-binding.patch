@@ -1,29 +1,30 @@
-diff --git a/packages/db/src/migrations/0099_better_actions_responder_binding.sql b/packages/db/src/migrations/0099_better_actions_responder_binding.sql
+diff --git a/packages/db/src/migrations/0103_better_actions_responder_binding.sql b/packages/db/src/migrations/0103_better_actions_responder_binding.sql
 new file mode 100644
 index 0000000..abba3ff
 --- /dev/null
-+++ b/packages/db/src/migrations/0099_better_actions_responder_binding.sql
++++ b/packages/db/src/migrations/0103_better_actions_responder_binding.sql
 @@ -0,0 +1,2 @@
 +ALTER TABLE "issue_thread_interactions" ADD COLUMN IF NOT EXISTS "responder_user_id" text;--> statement-breakpoint
 +ALTER TABLE "approvals" ADD COLUMN IF NOT EXISTS "approver_user_id" text;
 diff --git a/packages/db/src/migrations/meta/_journal.json b/packages/db/src/migrations/meta/_journal.json
-index 96c9209..058b538 100644
+index 55ff768..efa99a5 100644
 --- a/packages/db/src/migrations/meta/_journal.json
 +++ b/packages/db/src/migrations/meta/_journal.json
-@@ -694,6 +694,13 @@
-       "when": 1780534200000,
-       "tag": "0098_project_icon",
+@@ -722,6 +722,13 @@
+       "when": 1781490100000,
+       "tag": "0102_managed_sandbox_dedup_index",
        "breakpoints": true
 +    },
 +    {
-+      "idx": 99,
++      "idx": 103,
 +      "version": "7",
-+      "when": 1780534400000,
-+      "tag": "0099_better_actions_responder_binding",
++      "when": 1781490200000,
++      "tag": "0103_better_actions_responder_binding",
 +      "breakpoints": true
      }
    ]
  }
+\ No newline at end of file
 diff --git a/packages/db/src/schema/approvals.ts b/packages/db/src/schema/approvals.ts
 index f4cd512..cdfedc6 100644
 --- a/packages/db/src/schema/approvals.ts
@@ -54,7 +55,7 @@ index 7589595..0b9e49f 100644
      createdByUserId: text("created_by_user_id"),
      resolvedByAgentId: uuid("resolved_by_agent_id").references(() => agents.id),
 diff --git a/packages/shared/src/types/approval.ts b/packages/shared/src/types/approval.ts
-index 4554d36..1b0723d 100644
+index 4554d36..905ee9b 100644
 --- a/packages/shared/src/types/approval.ts
 +++ b/packages/shared/src/types/approval.ts
 @@ -6,6 +6,11 @@ export interface Approval {
@@ -70,7 +71,7 @@ index 4554d36..1b0723d 100644
    payload: Record<string, unknown>;
    decisionNote: string | null;
 diff --git a/packages/shared/src/types/issue.ts b/packages/shared/src/types/issue.ts
-index 61608be..efa4647 100644
+index 61608be..7c9854e 100644
 --- a/packages/shared/src/types/issue.ts
 +++ b/packages/shared/src/types/issue.ts
 @@ -669,6 +669,11 @@ export interface IssueCommentPresentation {
@@ -149,10 +150,10 @@ index 7d7454c..5167447 100644
      payload: requestCheckboxConfirmationPayloadSchema,
    }),
 diff --git a/server/src/routes/issues.ts b/server/src/routes/issues.ts
-index 0719a0e..7d0fa40 100644
+index cf39ba2..6fc8eaf 100644
 --- a/server/src/routes/issues.ts
 +++ b/server/src/routes/issues.ts
-@@ -2303,11 +2303,13 @@ export function issueRoutes(
+@@ -2440,11 +2440,13 @@ export function issueRoutes(
    });
  
    // Pending issue-thread interactions across the company, for the inbox "Decisions"
@@ -171,7 +172,7 @@ index 0719a0e..7d0fa40 100644
    router.get("/companies/:companyId/pending-interactions", async (req, res) => {
      const companyId = req.params.companyId as string;
      assertCompanyAccess(req, companyId);
-@@ -2320,7 +2322,14 @@ export function issueRoutes(
+@@ -2457,7 +2459,14 @@ export function issueRoutes(
        res.status(403).json({ error: "Pending interactions are outside this actor's authorization boundary" });
        return;
      }
