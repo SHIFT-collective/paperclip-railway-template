@@ -30,12 +30,17 @@ RUN git clone --depth 1 --branch "${PAPERCLIP_REF}" "${PAPERCLIP_REPO}" .
 # KIN-4780: "Waiting on you — Approver" badge, "Needs my decision" filter, and
 # derived "Awaiting board" chip (Better Actions Phase 3 UI), built on KIN-4701's
 # responder binding; UI-only.
-# All verified to apply cleanly against PAPERCLIP_REF=v2026.609.0. If you bump
+# All verified to apply cleanly against PAPERCLIP_REF=v2026.618.0. If you bump
 # PAPERCLIP_REF, re-verify each patch in patches/ still applies (the build fails
 # loudly here if one doesn't).
 COPY patches/ /tmp/paperclip-patches/
-RUN for p in /tmp/paperclip-patches/*.patch; do \
-        echo "Applying $p" && git apply --verbose "$p"; \
+# `set -e` + explicit exit so a single failed `git apply` aborts the build. The
+# previous bare `for` loop returned only the LAST patch's exit code, so a patch
+# that failed mid-list (e.g. after a PAPERCLIP_REF bump) was masked by a later
+# patch that still applied — the build went green with the change silently missing.
+RUN set -e; for p in /tmp/paperclip-patches/*.patch; do \
+        echo "Applying $p"; \
+        git apply --verbose "$p" || { echo "ERROR: patch $p failed to apply against ${PAPERCLIP_REF}" >&2; exit 1; }; \
     done
 
 RUN pnpm install --frozen-lockfile
