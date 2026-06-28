@@ -1,16 +1,16 @@
 diff --git a/ui/src/api/issues.ts b/ui/src/api/issues.ts
-index 4fc2e7f..5871e90 100644
+index 129b7b0..15e05e0 100644
 --- a/ui/src/api/issues.ts
 +++ b/ui/src/api/issues.ts
-@@ -19,6 +19,7 @@ import type {
-   IssueTreeControlPreview,
+@@ -20,6 +20,7 @@ import type {
    IssueTreeHold,
+   IssueWatchdog,
    IssueWorkProduct,
 +  PendingInteractionsResponse,
    PreviewIssueTreeControl,
    ReleaseIssueTreeHold,
-   UpsertIssueDocument,
-@@ -206,6 +207,10 @@ export const issuesApi = {
+   UpsertIssueWatchdog,
+@@ -212,6 +213,10 @@ export const issuesApi = {
    },
    listInteractions: (id: string) =>
      api.get<IssueThreadInteraction[]>(`/issues/${id}/interactions`),
@@ -619,11 +619,11 @@ index 0000000..71e0602
 +  );
 +}
 diff --git a/ui/src/hooks/useInboxBadge.ts b/ui/src/hooks/useInboxBadge.ts
-index 1e401ed..05cf2ed 100644
+index 22aaacf..d4f76e9 100644
 --- a/ui/src/hooks/useInboxBadge.ts
 +++ b/ui/src/hooks/useInboxBadge.ts
-@@ -195,6 +195,13 @@ export function useInboxBadge(companyId: string | null | undefined) {
-     enabled: !!companyId,
+@@ -200,6 +200,13 @@ export function useInboxBadge(companyId: string | null | undefined) {
+     staleTime: INBOX_BADGE_HOT_PATH_STALE_MS,
    });
  
 +  const { data: pendingInteractions } = useQuery({
@@ -636,7 +636,7 @@ index 1e401ed..05cf2ed 100644
    return useMemo(
      () =>
        computeInboxBadgeData({
-@@ -206,7 +213,8 @@ export function useInboxBadge(companyId: string | null | undefined) {
+@@ -211,7 +218,8 @@ export function useInboxBadge(companyId: string | null | undefined) {
          dismissedAlerts,
          dismissedAtByKey,
          currentUserId,
@@ -647,10 +647,10 @@ index 1e401ed..05cf2ed 100644
    );
  }
 diff --git a/ui/src/lib/inbox.ts b/ui/src/lib/inbox.ts
-index 780aeb3..f355ed6 100644
+index 48885d8..373e884 100644
 --- a/ui/src/lib/inbox.ts
 +++ b/ui/src/lib/inbox.ts
-@@ -80,6 +80,7 @@ export interface InboxBadgeData {
+@@ -81,6 +81,7 @@ export interface InboxBadgeData {
    failedRuns: number;
    joinRequests: number;
    mineIssues: number;
@@ -658,7 +658,7 @@ index 780aeb3..f355ed6 100644
    alerts: number;
  }
  
-@@ -1220,6 +1221,7 @@ export function computeInboxBadgeData({
+@@ -1230,6 +1231,7 @@ export function computeInboxBadgeData({
    dismissedAlerts,
    dismissedAtByKey,
    currentUserId,
@@ -666,7 +666,7 @@ index 780aeb3..f355ed6 100644
  }: {
    approvals: Approval[];
    joinRequests: JoinRequest[];
-@@ -1229,6 +1231,7 @@ export function computeInboxBadgeData({
+@@ -1239,6 +1241,7 @@ export function computeInboxBadgeData({
    dismissedAlerts: Set<string>;
    dismissedAtByKey: ReadonlyMap<string, number>;
    currentUserId?: string | null;
@@ -674,7 +674,7 @@ index 780aeb3..f355ed6 100644
  }): InboxBadgeData {
    const actionableApprovals = approvals.filter(
      (approval) =>
-@@ -1258,11 +1261,15 @@ export function computeInboxBadgeData({
+@@ -1268,11 +1271,15 @@ export function computeInboxBadgeData({
  
    return {
      // The inbox badge reflects personal/actionable work, not company-wide health alerts.
@@ -692,10 +692,10 @@ index 780aeb3..f355ed6 100644
    };
  }
 diff --git a/ui/src/lib/queryKeys.ts b/ui/src/lib/queryKeys.ts
-index e98ba81..597f16c 100644
+index af61062..6d6dd3a 100644
 --- a/ui/src/lib/queryKeys.ts
 +++ b/ui/src/lib/queryKeys.ts
-@@ -188,6 +188,7 @@ export const queryKeys = {
+@@ -250,6 +250,7 @@ export const queryKeys = {
    userProfile: (companyId: string, userSlug: string) =>
      ["user-profile", companyId, userSlug] as const,
    sidebarBadges: (companyId: string) => ["sidebar-badges", companyId] as const,
@@ -704,10 +704,10 @@ index e98ba81..597f16c 100644
    activity: (companyId: string) => ["activity", companyId] as const,
    costs: (companyId: string, from?: string, to?: string) =>
 diff --git a/ui/src/pages/Inbox.tsx b/ui/src/pages/Inbox.tsx
-index 3ad6be1..d25b94a 100644
+index 63a7785..4e3e7a8 100644
 --- a/ui/src/pages/Inbox.tsx
 +++ b/ui/src/pages/Inbox.tsx
-@@ -50,6 +50,7 @@ import {
+@@ -51,6 +51,7 @@ import {
  } from "../lib/keyboardShortcuts";
  import { EmptyState } from "../components/EmptyState";
  import { IssueGroupHeader } from "../components/IssueGroupHeader";
@@ -715,7 +715,7 @@ index 3ad6be1..d25b94a 100644
  import { PageSkeleton } from "../components/PageSkeleton";
  import {
    InboxIssueMetaLeading,
-@@ -721,6 +722,13 @@ export function Inbox() {
+@@ -723,6 +724,13 @@ export function Inbox() {
      enabled: !!selectedCompanyId,
    });
  
@@ -729,7 +729,7 @@ index 3ad6be1..d25b94a 100644
    const { data: projects } = useQuery({
      queryKey: queryKeys.projects.list(selectedCompanyId!),
      queryFn: () => projectsApi.list(selectedCompanyId!),
-@@ -856,6 +864,10 @@ export function Inbox() {
+@@ -867,6 +875,10 @@ export function Inbox() {
      () => buildCompanyUserLabelMap(companyMembers?.users),
      [companyMembers?.users],
    );
@@ -740,7 +740,7 @@ index 3ad6be1..d25b94a 100644
    const companyUserProfileMap = useMemo(
      () => buildCompanyUserProfileMap(companyMembers?.users),
      [companyMembers?.users],
-@@ -2256,6 +2268,18 @@ export function Inbox() {
+@@ -2319,6 +2331,18 @@ export function Inbox() {
          />
        ) : null}
  
