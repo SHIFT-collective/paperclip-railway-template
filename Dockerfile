@@ -9,14 +9,15 @@ RUN apt-get update \
 RUN corepack enable
 
 ARG PAPERCLIP_REPO=https://github.com/paperclipai/paperclip.git
-ARG PAPERCLIP_REF=v2026.618.0
+ARG PAPERCLIP_REF=v2026.626.0
 
 WORKDIR /paperclip
 RUN git clone --depth 1 --branch "${PAPERCLIP_REF}" "${PAPERCLIP_REPO}" .
 
 # Downstream patches applied on top of the pinned upstream ref.
-# KIN-4355: split issue:comment from issue:mutate so mention-woken non-assignee
-# agents can comment on the issue that woke them.
+# KIN-4355 (issue:comment vs issue:mutate split) was DROPPED at v2026.626.0 — it
+# is now upstream (server/src/services/authorization.ts declares both actions and
+# routes/issues.ts gates comments on "issue:comment"), so the patch is redundant.
 # KIN-4697: add GET /api/companies/:companyId/pending-interactions + the
 # listPendingForCompany service method (Better Actions Phase 1 backend) so the
 # inbox can surface pending board decisions outside their thread.
@@ -27,12 +28,17 @@ RUN git clone --depth 1 --branch "${PAPERCLIP_REF}" "${PAPERCLIP_REPO}" .
 # Actions Phase 2 UI), reusing the Phase 1 decision row.
 # KIN-4701: responder/approver binding backend (Better Actions Phase 3) — adds
 # nullable responder_user_id / approver_user_id + responderUserId=me filtering.
+# Its migration is renumbered to 0125_better_actions_responder_binding at 626
+# (618 ended at 0102; 626 already ships 0103..0124, so the feature migration
+# moved to 0125 and the journal appends idx 125).
 # KIN-4780: "Waiting on you — Approver" badge, "Needs my decision" filter, and
 # derived "Awaiting board" chip (Better Actions Phase 3 UI), built on KIN-4701's
 # responder binding; UI-only.
-# All verified to apply cleanly against PAPERCLIP_REF=v2026.618.0. If you bump
-# PAPERCLIP_REF, re-verify each patch in patches/ still applies (the build fails
-# loudly here if one doesn't).
+# All 5 patches re-verified to apply cleanly (sequentially) against
+# PAPERCLIP_REF=v2026.626.0. If you bump PAPERCLIP_REF, re-verify each patch in
+# patches/ still applies on the cumulative tree (the build fails loudly here if
+# one doesn't) and re-run the UI typecheck — patches are cumulative, not
+# independent, so check them in glob order.
 COPY patches/ /tmp/paperclip-patches/
 # `set -e` + explicit exit so a single failed `git apply` aborts the build. The
 # previous bare `for` loop returned only the LAST patch's exit code, so a patch

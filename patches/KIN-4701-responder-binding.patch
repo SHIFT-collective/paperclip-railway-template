@@ -1,30 +1,29 @@
-diff --git a/packages/db/src/migrations/0103_better_actions_responder_binding.sql b/packages/db/src/migrations/0103_better_actions_responder_binding.sql
+diff --git a/packages/db/src/migrations/0125_better_actions_responder_binding.sql b/packages/db/src/migrations/0125_better_actions_responder_binding.sql
 new file mode 100644
 index 0000000..abba3ff
 --- /dev/null
-+++ b/packages/db/src/migrations/0103_better_actions_responder_binding.sql
++++ b/packages/db/src/migrations/0125_better_actions_responder_binding.sql
 @@ -0,0 +1,2 @@
 +ALTER TABLE "issue_thread_interactions" ADD COLUMN IF NOT EXISTS "responder_user_id" text;--> statement-breakpoint
 +ALTER TABLE "approvals" ADD COLUMN IF NOT EXISTS "approver_user_id" text;
 diff --git a/packages/db/src/migrations/meta/_journal.json b/packages/db/src/migrations/meta/_journal.json
-index 55ff768..efa99a5 100644
+index 6c63f8b..116abc1 100644
 --- a/packages/db/src/migrations/meta/_journal.json
 +++ b/packages/db/src/migrations/meta/_journal.json
-@@ -722,6 +722,13 @@
-       "when": 1781490100000,
-       "tag": "0102_managed_sandbox_dedup_index",
+@@ -876,6 +876,13 @@
+       "when": 1782440000000,
+       "tag": "0124_agent_api_key_scope_config",
        "breakpoints": true
 +    },
 +    {
-+      "idx": 103,
++      "idx": 125,
 +      "version": "7",
-+      "when": 1781490200000,
-+      "tag": "0103_better_actions_responder_binding",
++      "when": 1782440100000,
++      "tag": "0125_better_actions_responder_binding",
 +      "breakpoints": true
      }
    ]
  }
-\ No newline at end of file
 diff --git a/packages/db/src/schema/approvals.ts b/packages/db/src/schema/approvals.ts
 index f4cd512..cdfedc6 100644
 --- a/packages/db/src/schema/approvals.ts
@@ -71,10 +70,10 @@ index 4554d36..905ee9b 100644
    payload: Record<string, unknown>;
    decisionNote: string | null;
 diff --git a/packages/shared/src/types/issue.ts b/packages/shared/src/types/issue.ts
-index 61608be..7c9854e 100644
+index 047d946..ebe46e1 100644
 --- a/packages/shared/src/types/issue.ts
 +++ b/packages/shared/src/types/issue.ts
-@@ -669,6 +669,11 @@ export interface IssueCommentPresentation {
+@@ -698,6 +698,11 @@ export interface IssueCommentPresentation {
  export interface IssueThreadInteractionActorFields {
    createdByAgentId?: string | null;
    createdByUserId?: string | null;
@@ -86,7 +85,7 @@ index 61608be..7c9854e 100644
    resolvedByAgentId?: string | null;
    resolvedByUserId?: string | null;
  }
-@@ -908,6 +913,12 @@ export interface PendingInteraction {
+@@ -937,6 +942,12 @@ export interface PendingInteraction {
    issue: PendingInteractionIssueRef;
    requestedByAgent: PendingInteractionAgentRef | null;
    requestedByUserId: string | null;
@@ -114,10 +113,10 @@ index d24efad..a5c97f2 100644
    issueIds: z.array(z.string().uuid()).optional(),
  });
 diff --git a/packages/shared/src/validators/issue.ts b/packages/shared/src/validators/issue.ts
-index 7d7454c..5167447 100644
+index f1e8fcb..2d2758d 100644
 --- a/packages/shared/src/validators/issue.ts
 +++ b/packages/shared/src/validators/issue.ts
-@@ -862,6 +862,7 @@ export const createIssueThreadInteractionSchema = z.discriminatedUnion("kind", [
+@@ -879,6 +879,7 @@ export const createIssueThreadInteractionSchema = z.discriminatedUnion("kind", [
      sourceRunId: z.string().uuid().nullable().optional(),
      title: z.string().trim().max(240).nullable().optional(),
      summary: z.string().trim().max(1000).nullable().optional(),
@@ -125,7 +124,7 @@ index 7d7454c..5167447 100644
      continuationPolicy: issueThreadInteractionContinuationPolicySchema.optional().default("wake_assignee"),
      payload: suggestTasksPayloadSchema,
    }),
-@@ -872,6 +873,7 @@ export const createIssueThreadInteractionSchema = z.discriminatedUnion("kind", [
+@@ -889,6 +890,7 @@ export const createIssueThreadInteractionSchema = z.discriminatedUnion("kind", [
      sourceRunId: z.string().uuid().nullable().optional(),
      title: z.string().trim().max(240).nullable().optional(),
      summary: z.string().trim().max(1000).nullable().optional(),
@@ -133,7 +132,7 @@ index 7d7454c..5167447 100644
      continuationPolicy: issueThreadInteractionContinuationPolicySchema.optional().default("wake_assignee"),
      payload: askUserQuestionsPayloadSchema,
    }),
-@@ -882,6 +884,7 @@ export const createIssueThreadInteractionSchema = z.discriminatedUnion("kind", [
+@@ -899,6 +901,7 @@ export const createIssueThreadInteractionSchema = z.discriminatedUnion("kind", [
      sourceRunId: z.string().uuid().nullable().optional(),
      title: z.string().trim().max(240).nullable().optional(),
      summary: z.string().trim().max(1000).nullable().optional(),
@@ -141,7 +140,7 @@ index 7d7454c..5167447 100644
      continuationPolicy: issueThreadInteractionContinuationPolicySchema.optional().default("none"),
      payload: requestConfirmationPayloadSchema,
    }),
-@@ -892,6 +895,7 @@ export const createIssueThreadInteractionSchema = z.discriminatedUnion("kind", [
+@@ -909,6 +912,7 @@ export const createIssueThreadInteractionSchema = z.discriminatedUnion("kind", [
      sourceRunId: z.string().uuid().nullable().optional(),
      title: z.string().trim().max(240).nullable().optional(),
      summary: z.string().trim().max(1000).nullable().optional(),
@@ -150,10 +149,10 @@ index 7d7454c..5167447 100644
      payload: requestCheckboxConfirmationPayloadSchema,
    }),
 diff --git a/server/src/routes/issues.ts b/server/src/routes/issues.ts
-index cf39ba2..6fc8eaf 100644
+index 60e5693..1a39a18 100644
 --- a/server/src/routes/issues.ts
 +++ b/server/src/routes/issues.ts
-@@ -2440,11 +2440,13 @@ export function issueRoutes(
+@@ -2983,11 +2983,13 @@ export function issueRoutes(
    });
  
    // Pending issue-thread interactions across the company, for the inbox "Decisions"
@@ -172,7 +171,7 @@ index cf39ba2..6fc8eaf 100644
    router.get("/companies/:companyId/pending-interactions", async (req, res) => {
      const companyId = req.params.companyId as string;
      assertCompanyAccess(req, companyId);
-@@ -2457,7 +2459,14 @@ export function issueRoutes(
+@@ -3000,7 +3002,14 @@ export function issueRoutes(
        res.status(403).json({ error: "Pending interactions are outside this actor's authorization boundary" });
        return;
      }
@@ -189,7 +188,7 @@ index cf39ba2..6fc8eaf 100644
    });
  
 diff --git a/server/src/services/issue-thread-interactions.ts b/server/src/services/issue-thread-interactions.ts
-index 13d9e14..34948a7 100644
+index d1ecc0b..9d55f5e 100644
 --- a/server/src/services/issue-thread-interactions.ts
 +++ b/server/src/services/issue-thread-interactions.ts
 @@ -1,5 +1,5 @@
@@ -207,7 +206,7 @@ index 13d9e14..34948a7 100644
      && (row.createdByAgentId ?? null) === (actor.agentId ?? null)
      && (row.createdByUserId ?? null) === (actor.userId ?? null)
      && isDeepStrictEqual(row.payload, input.payload)
-@@ -763,15 +764,26 @@ export function issueThreadInteractionService(db: Db) {
+@@ -767,15 +768,26 @@ export function issueThreadInteractionService(db: Db) {
       * target for plan-bound confirmations. Interactions on terminal (done/cancelled) or
       * hidden issues are excluded — those decisions are no longer actionable.
       *
@@ -238,7 +237,7 @@ index 13d9e14..34948a7 100644
        const rows = await db
          .select({
            interaction: issueThreadInteractions,
-@@ -789,6 +801,7 @@ export function issueThreadInteractionService(db: Db) {
+@@ -793,6 +805,7 @@ export function issueThreadInteractionService(db: Db) {
            eq(issueThreadInteractions.status, "pending"),
            notInArray(issues.status, ["done", "cancelled"]),
            isNull(issues.hiddenAt),
@@ -246,7 +245,7 @@ index 13d9e14..34948a7 100644
          ))
          .orderBy(asc(issueThreadInteractions.createdAt), asc(issueThreadInteractions.id));
  
-@@ -812,6 +825,7 @@ export function issueThreadInteractionService(db: Db) {
+@@ -816,6 +829,7 @@ export function issueThreadInteractionService(db: Db) {
            },
            requestedByAgent: row.agentId ? { id: row.agentId, name: row.agentName ?? "" } : null,
            requestedByUserId: interaction.createdByUserId ?? null,
@@ -254,7 +253,7 @@ index 13d9e14..34948a7 100644
            ageSeconds,
            target,
          } satisfies PendingInteraction;
-@@ -891,6 +905,7 @@ export function issueThreadInteractionService(db: Db) {
+@@ -895,6 +909,7 @@ export function issueThreadInteractionService(db: Db) {
              sourceRunId: data.sourceRunId ?? null,
              title: data.title ?? null,
              summary: data.summary ?? null,
